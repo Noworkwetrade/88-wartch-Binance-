@@ -1,0 +1,1190 @@
+/**
+ * Real-Time TradingView Style Candlestick Chart Component
+ * Powered exclusively by genuine WEEX Spot v3 market data.
+ *
+ * Interaction Features:
+ * - Direct inline dropdown underneath clicked asset row
+ * - Free horizontal pan with empty forward right-margin (unlocked viewport)
+ * - Free vertical price movement (drag canvas vertically to pan price)
+ * - Interactive right price scale: drag to compress/stretch vertical price scale, double-click to auto-fit
+ * - Interactive bottom time scale: drag to compress/stretch horizontal candle width
+ * - Focal-point zooming on mouse wheel (centered on cursor) & pinch zoom on touch (centered on fingers)
+ * - Pointer capture for glitch-free dragging even when cursor leaves canvas
+ * - Non-passive touch listeners with preventDefault() so table/page never scrolls while dragging chart
+ * - ResizeObserver so canvas measures exact width and height immediately without blank frames
+ * - Real-time candle movement: active candle body, wicks, and close update live with every WEEX tick
+ * - Live Market Structure (HH, HL, LH, LL, BOS, CHoCH) calculated strictly from real candle prices
+ * - Full timeframes: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 1w, 1M
+ * - In-place close button to collapse dropdown
+ */
+
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import {
+  RotateCcw,
+  ZoomIn,
+  ZoomOut,
+  ChevronDown,
+  Layers,
+  TrendingUp,
+  TrendingDown,
+  Activity,
+  X
+} from 'lucide-react';
+import { Candle, Timeframe, TickerData, MarketStructureResult } from '../types.ts';
+import { calculateMarketStructure, getTimeframeDurationMs } from '../utils/marketStructure.ts';
+import { formatPrice } from './WatchlistTable.tsx';
+import { ChartScanner } from './scanner/ChartScanner.tsx';
+
+interface CandlestickChartProps {
+  symbol: string;
+  ticker: TickerData | null;
+  timeframe: Timeframe;
+  onTimeframeChange: (tf: Timeframe) => void;
+  onClose?: () => void;
+}
+
+const TIMEFRAMES: Timeframe[] = [
+  '1m', '5m', '15m', '30m',
+  '1h', '2h', '4h', '6h', '8h', '12h',
+  '1d', '1w', '1M'
+];
+
+/**
+ * Calculates clean round price tick increments
+ */
+function getNicePriceStep(range: number, targetCount = 6): number {
+  if (range <= 0 || isNaN(range)) return 1;
+  const rawStep = range / targetCount;
+  const power = Math.floor(Math.log10(rawStep));
+  const magnitude = Math.pow(10, power);
+  const normalized = rawStep / magnitude;
+
+  let cleanStep = magnitude;
+  if (normalized < 1.5) cleanStep = 1 * magnitude;
+  else if (normalized < 3) cleanStep = 2 * magnitude;
+  else if (normalized < 7) cleanStep = 5 * magnitude;
+  else cleanStep = 10 * magnitude;
+
+  return cleanStep;
+}
+
+export const CandlestickChart: React.FC<CandlestickChartProps> = ({
+  symbol,
+  ticker,
+  timeframe,
+  onTimeframeChange,
+  onClose
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Candles data state
+  const [candles, setCandles] = useState<Candle[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // --- TradingView Interactive Transformation State ---
+  // Horizontal zoom (pixels per candle)
+  const [candleWidth, setCandleWidth] = useState<number>(11);
+  // Horizontal scroll pan (offset in candles from latest candle)
+  // Negative values allow empty right margin space (just like TradingView!)
+  const [panOffset, setPanOffset] = useState<number>(-12);
+  // Vertical price offset in pixels (allows moving price up/down freely)
+  const [priceOffset, setPriceOffset] = useState<number>(0);
+  // Vertical price scale factor (stretch/compress)
+  const [priceScaleRatio, setPriceScaleRatio] = useState<number>(1.0);
+  // Auto-fit scale mode (true until user drags/scales price vertically)
+  const [autoScale, setAutoScale] = useState<boolean>(true);
+
+  // Market Structure toggle
+  const [showMarketStructure, setShowMarketStructure] = useState<boolean>(() => {
+    return localStorage.getItem('weex_show_market_structure') !== 'false';
+  });
+
+  // Crosshair state
+  const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+  const [cursorStyle, setCursorStyle] = useState<string>('crosshair');
+
+  // Drag interaction state
+  const dragModeRef = useRef<'none' | 'chart' | 'priceScale' | 'timeScale'>('none');
+  const dragStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const initialPanOffsetRef = useRef<number>(-12);
+  const initialPriceOffsetRef = useRef<number>(0);
+  const initialPriceScaleRef = useRef<number>(1.0);
+  const initialCandleWidthRef = useRef<number>(11);
+
+  // Pinch zoom state
+  const initialPinchDistanceRef = useRef<number | null>(null);
+  const initialPinchCenterRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Timeframe dropdown state
+  const [isTfDropdownOpen, setIsTfDropdownOpen] = useState<boolean>(false);
+
+  // Container dimensions from ResizeObserver
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const chartDimsRef = useRef<{ width: number; height: number; chartWidth: number; chartHeight: number }>({
+    width: 800,
+    height: 450,
+    chartWidth: 730,
+    chartHeight: 424
+  });
+
+  // Persist market structure toggle preference
+  useEffect(() => {
+    localStorage.setItem('weex_show_market_structure', String(showMarketStructure));
+  }, [showMarketStructure]);
+
+  // ResizeObserver to track container dimensions immediately
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 20 && height > 20) {
+          setContainerSize({ width: Math.round(width), height: Math.round(height) });
+        }
+      }
+    });
+
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, []);
+
+  // Fetch real WEEX historical candles with automatic retry and abort protection
+  const handleManualRetry = useCallback(() => {
+    if (!symbol) return;
+    setIsLoading(true);
+    setFetchError(null);
+    fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&limit=250`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to load WEEX candles (${res.status})`);
+        return res.json();
+      })
+      .then((data) => {
+        if (Array.isArray(data.candles)) {
+          setCandles(data.candles);
+          setFetchError(null);
+          setPanOffset(-12);
+          setPriceOffset(0);
+          setPriceScaleRatio(1.0);
+          setAutoScale(true);
+        } else {
+          setCandles([]);
+        }
+      })
+      .catch((err) => {
+        console.warn('[CandlestickChart] Manual retry error:', err.message);
+        setFetchError(err.message || 'Error loading historical candles');
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, [symbol, timeframe]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    const controller = new AbortController();
+
+    async function fetchWithRetry(retry = 0) {
+      if (!symbol || isCancelled) return;
+      setIsLoading(true);
+      setFetchError(null);
+
+      try {
+        const res = await fetch(
+          `/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&limit=250`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load WEEX candles (${res.status})`);
+        }
+        const data = await res.json();
+        if (isCancelled) return;
+
+        if (Array.isArray(data.candles) && data.candles.length > 0) {
+          setCandles(data.candles);
+          setFetchError(null);
+          setPanOffset(-12);
+          setPriceOffset(0);
+          setPriceScaleRatio(1.0);
+          setAutoScale(true);
+        } else if (Array.isArray(data.candles)) {
+          setCandles(data.candles);
+        } else {
+          setCandles([]);
+        }
+      } catch (err: any) {
+        if (isCancelled || err.name === 'AbortError') return;
+        if (retry < 2) {
+          setTimeout(() => {
+            if (!isCancelled) fetchWithRetry(retry + 1);
+          }, 800);
+          return;
+        }
+        console.warn('[CandlestickChart] Error loading klines:', err.message);
+        setFetchError(err.message || 'Error loading historical candles');
+      } finally {
+        if (!isCancelled) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    fetchWithRetry();
+
+    return () => {
+      isCancelled = true;
+      controller.abort();
+    };
+  }, [symbol, timeframe]);
+
+  // Real-time candle updates:
+  // Dynamically update active candle's close, high, low, wicks with live WEEX ticks
+  useEffect(() => {
+    if (!ticker || ticker.lastPrice === '--') return;
+
+    const currentPrice = parseFloat(ticker.lastPrice);
+    if (isNaN(currentPrice)) return;
+
+    const tickTime = ticker.lastUpdateTime || Date.now();
+    const intervalMs = getTimeframeDurationMs(timeframe);
+
+    setCandles((prevCandles) => {
+      if (prevCandles.length === 0) {
+        const openTime = Math.floor(tickTime / intervalMs) * intervalMs;
+        const newCandle: Candle = {
+          openTime,
+          open: currentPrice,
+          high: currentPrice,
+          low: currentPrice,
+          close: currentPrice,
+          volume: parseFloat(ticker.volume) || 0,
+          closeTime: openTime + intervalMs
+        };
+        return [newCandle];
+      }
+
+      const lastIdx = prevCandles.length - 1;
+      const lastCandle = prevCandles[lastIdx];
+
+      // If tick time surpassed interval duration, append new candle
+      if (tickTime >= lastCandle.openTime + intervalMs) {
+        const newOpenTime = Math.floor(tickTime / intervalMs) * intervalMs;
+        const newCandle: Candle = {
+          openTime: newOpenTime,
+          open: currentPrice,
+          high: currentPrice,
+          low: currentPrice,
+          close: currentPrice,
+          volume: 0,
+          closeTime: newOpenTime + intervalMs
+        };
+        return [...prevCandles, newCandle];
+      } else {
+        // Update active candle in real time
+        const updatedLast: Candle = {
+          ...lastCandle,
+          close: currentPrice,
+          high: Math.max(lastCandle.high, currentPrice),
+          low: Math.min(lastCandle.low, currentPrice),
+          closeTime: tickTime
+        };
+        const next = [...prevCandles];
+        next[lastIdx] = updatedLast;
+        return next;
+      }
+    });
+  }, [ticker, timeframe]);
+
+  // Calculate Market Structure from actual candle data
+  const marketStructure: MarketStructureResult = useMemo(() => {
+    return calculateMarketStructure(candles, 2);
+  }, [candles]);
+
+  // Reset View to latest price & auto-scale
+  const handleResetView = useCallback(() => {
+    setCandleWidth(11);
+    setPanOffset(-12);
+    setPriceOffset(0);
+    setPriceScaleRatio(1.0);
+    setAutoScale(true);
+  }, []);
+
+  // Zoom controls (+ / - buttons)
+  const handleZoom = useCallback((direction: 'in' | 'out') => {
+    const factor = direction === 'in' ? 1.25 : 0.8;
+    const { chartWidth } = chartDimsRef.current;
+    const focalX = chartWidth / 2;
+
+    setCandleWidth((prevWidth) => {
+      const newWidth = Math.max(3, Math.min(65, prevWidth * factor));
+      const panShift = (chartWidth - focalX) * (1 / prevWidth - 1 / newWidth);
+      setPanOffset((prevPan) => prevPan + panShift);
+      return newWidth;
+    });
+  }, []);
+
+  // --- Focal-Point Mouse Wheel Zoom ---
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const { chartWidth } = chartDimsRef.current;
+
+    const zoomIn = e.deltaY < 0;
+    const factor = zoomIn ? 1.12 : 0.89;
+
+    // Wheel over right price scale -> zoom vertical price scale
+    if (mouseX >= chartWidth) {
+      setAutoScale(false);
+      setPriceScaleRatio((prev) => Math.max(0.1, Math.min(10, prev * factor)));
+      return;
+    }
+
+    // Wheel over chart or time scale -> focal point zoom centered exactly at mouseX!
+    setCandleWidth((prevWidth) => {
+      const newWidth = Math.max(3, Math.min(65, prevWidth * factor));
+      const focalX = Math.min(chartWidth, Math.max(0, mouseX));
+      // Exact focal point math: candle at focalX remains at focalX after zoom
+      const panShift = (chartWidth - focalX) * (1 / prevWidth - 1 / newWidth);
+      setPanOffset((prevPan) => prevPan + panShift);
+      return newWidth;
+    });
+  }, []);
+
+  // --- Pointer Down (Mouse & Touch start) ---
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    // Capture pointer so drag events continue even outside the canvas boundaries
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch (err) {
+      // ignore
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const { chartWidth, chartHeight } = chartDimsRef.current;
+
+    dragStartPosRef.current = { x: e.clientX, y: e.clientY };
+    initialPanOffsetRef.current = panOffset;
+    initialPriceOffsetRef.current = priceOffset;
+    initialPriceScaleRef.current = priceScaleRatio;
+    initialCandleWidthRef.current = candleWidth;
+
+    if (x >= chartWidth) {
+      dragModeRef.current = 'priceScale';
+      setCursorStyle('ns-resize');
+    } else if (y >= chartHeight) {
+      dragModeRef.current = 'timeScale';
+      setCursorStyle('ew-resize');
+    } else {
+      dragModeRef.current = 'chart';
+      setCursorStyle('grabbing');
+    }
+  }, [panOffset, priceOffset, priceScaleRatio, candleWidth]);
+
+  // --- Pointer Move (Mouse & Touch drag) ---
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const { chartWidth, chartHeight } = chartDimsRef.current;
+
+    setMousePos({ x, y });
+
+    if (dragModeRef.current === 'none') {
+      if (x >= chartWidth) {
+        setCursorStyle('ns-resize');
+      } else if (y >= chartHeight) {
+        setCursorStyle('ew-resize');
+      } else {
+        setCursorStyle('crosshair');
+      }
+      return;
+    }
+
+    const deltaX = e.clientX - dragStartPosRef.current.x;
+    const deltaY = e.clientY - dragStartPosRef.current.y;
+
+    if (dragModeRef.current === 'chart') {
+      // 1. Horizontal Pan (free scrolling left and right)
+      const candlesMoved = deltaX / candleWidth;
+      const newPan = initialPanOffsetRef.current + candlesMoved;
+      // Clamp pan bounds so user doesn't get lost in infinity
+      const maxPan = candles.length - 2;
+      const minPan = -45; // allows generous right margin forward space
+      setPanOffset(Math.max(minPan, Math.min(maxPan, newPan)));
+
+      // 2. Vertical Pan (shifts price scale up and down freely)
+      setAutoScale(false);
+      setPriceOffset(initialPriceOffsetRef.current + deltaY);
+    } else if (dragModeRef.current === 'priceScale') {
+      // Dragging price scale stretches/compresses vertical price range
+      setAutoScale(false);
+      const scaleMultiplier = Math.pow(1.008, deltaY);
+      setPriceScaleRatio(Math.max(0.1, Math.min(10, initialPriceScaleRef.current * scaleMultiplier)));
+    } else if (dragModeRef.current === 'timeScale') {
+      // Dragging time scale stretches/compresses horizontal candle width
+      const scaleMultiplier = Math.pow(1.008, deltaX);
+      const newWidth = Math.max(3, Math.min(65, initialCandleWidthRef.current * scaleMultiplier));
+      setCandleWidth(newWidth);
+    }
+  }, [candleWidth, candles.length]);
+
+  // --- Pointer Up (Mouse & Touch end) ---
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (canvas) {
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch (err) {}
+    }
+    dragModeRef.current = 'none';
+    setCursorStyle('crosshair');
+  }, []);
+
+  const handlePointerLeave = useCallback(() => {
+    if (dragModeRef.current === 'none') {
+      setMousePos(null);
+      setCursorStyle('crosshair');
+    }
+  }, []);
+
+  // Double click price scale to auto-fit
+  const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const { chartWidth } = chartDimsRef.current;
+
+    if (x >= chartWidth) {
+      setAutoScale(true);
+      setPriceOffset(0);
+      setPriceScaleRatio(1.0);
+    }
+  }, []);
+
+  // Attach non-passive touch listeners directly to canvas so table NEVER scrolls while dragging chart
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        dragModeRef.current = 'none';
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+        initialPinchDistanceRef.current = dist;
+        initialCandleWidthRef.current = candleWidth;
+        initialPanOffsetRef.current = panOffset;
+
+        const rect = canvas.getBoundingClientRect();
+        const midX = (t1.clientX + t2.clientX) / 2 - rect.left;
+        const midY = (t1.clientY + t2.clientY) / 2 - rect.top;
+        initialPinchCenterRef.current = { x: midX, y: midY };
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      // Prevent browser table scrolling when touching chart canvas
+      e.preventDefault();
+
+      if (e.touches.length === 2 && initialPinchDistanceRef.current !== null) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const currentDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+        const scale = currentDist / initialPinchDistanceRef.current;
+
+        const newWidth = Math.max(3, Math.min(65, initialCandleWidthRef.current * scale));
+        const focalX = initialPinchCenterRef.current
+          ? initialPinchCenterRef.current.x
+          : chartDimsRef.current.chartWidth / 2;
+        const { chartWidth } = chartDimsRef.current;
+
+        const panShift = (chartWidth - focalX) * (1 / initialCandleWidthRef.current - 1 / newWidth);
+        setCandleWidth(newWidth);
+        setPanOffset(initialPanOffsetRef.current + panShift);
+      }
+    };
+
+    const onTouchEnd = () => {
+      initialPinchDistanceRef.current = null;
+      initialPinchCenterRef.current = null;
+    };
+
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvas.addEventListener('touchend', onTouchEnd, { passive: true });
+    canvas.addEventListener('touchcancel', onTouchEnd, { passive: true });
+
+    return () => {
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+      canvas.removeEventListener('touchend', onTouchEnd);
+      canvas.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [candleWidth, panOffset]);
+
+  // --- Main Canvas Rendering Engine ---
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth || containerSize.width || 800;
+    const height = canvas.clientHeight || containerSize.height || 450;
+
+    if (width <= 0 || height <= 0) return;
+
+    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+    }
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    const rightMargin = 72; // Width of price axis
+    const bottomMargin = 26; // Height of time axis
+    const chartWidth = Math.max(50, width - rightMargin);
+    const chartHeight = Math.max(50, height - bottomMargin);
+
+    chartDimsRef.current = { width, height, chartWidth, chartHeight };
+
+    // Dark TradingView Background
+    ctx.fillStyle = '#08090d';
+    ctx.fillRect(0, 0, width, height);
+
+    if (candles.length === 0) {
+      ctx.restore();
+      return;
+    }
+
+    // Determine Visible Candle Range based on candleWidth and panOffset
+    const visibleCount = Math.ceil(chartWidth / candleWidth) + 3;
+    const rawEndIndex = Math.round(candles.length - 1 - panOffset);
+    // Allow forward margin space while clamping to valid candle array
+    const safeEndIndex = Math.min(candles.length - 1, Math.max(0, rawEndIndex));
+    const startIndex = Math.max(0, safeEndIndex - visibleCount);
+
+    const visibleCandles = safeEndIndex >= startIndex ? candles.slice(startIndex, safeEndIndex + 1) : [];
+
+    // Determine Price Bounds
+    let minPrice = Infinity;
+    let maxPrice = -Infinity;
+
+    if (visibleCandles.length > 0) {
+      for (const c of visibleCandles) {
+        if (c.low < minPrice) minPrice = c.low;
+        if (c.high > maxPrice) maxPrice = c.high;
+      }
+    } else {
+      const last = candles[candles.length - 1];
+      minPrice = last ? last.low : 100;
+      maxPrice = last ? last.high : 100;
+    }
+
+    const naturalSpan = maxPrice - minPrice || 1;
+    const paddedNaturalMin = minPrice - naturalSpan * 0.08;
+    const paddedNaturalMax = maxPrice + naturalSpan * 0.08;
+
+    // Apply Vertical Price Offset and Price Scale Ratio (when user drags/scales price)
+    let effectiveMin: number;
+    let effectiveMax: number;
+
+    if (autoScale) {
+      effectiveMin = paddedNaturalMin;
+      effectiveMax = paddedNaturalMax;
+    } else {
+      const centerPrice = (paddedNaturalMin + paddedNaturalMax) / 2;
+      const halfSpan = ((paddedNaturalMax - paddedNaturalMin) / 2) * priceScaleRatio;
+      const pricePerPixel = (halfSpan * 2) / chartHeight;
+      const priceShift = priceOffset * pricePerPixel;
+
+      effectiveMin = centerPrice - halfSpan + priceShift;
+      effectiveMax = centerPrice + halfSpan + priceShift;
+    }
+
+    const effectiveRange = effectiveMax - effectiveMin || 1;
+
+    const priceToY = (price: number) => {
+      return chartHeight - ((price - effectiveMin) / effectiveRange) * chartHeight;
+    };
+
+    const yToPrice = (y: number) => {
+      return effectiveMin + ((chartHeight - y) / chartHeight) * effectiveRange;
+    };
+
+    // 1. Draw Clean Grid Lines & Right Price Scale Axis
+    const priceStep = getNicePriceStep(effectiveRange, 7);
+    const firstTickPrice = Math.floor(effectiveMin / priceStep) * priceStep;
+
+    ctx.lineWidth = 1;
+    for (let p = firstTickPrice; p <= effectiveMax + priceStep; p += priceStep) {
+      const y = priceToY(p);
+      if (y >= 0 && y <= chartHeight) {
+        // Horizontal grid line
+        ctx.strokeStyle = '#1e222d';
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(chartWidth, y);
+        ctx.stroke();
+
+        // Right margin price label
+        ctx.fillStyle = '#787b86';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(formatPrice(p), chartWidth + 7, y);
+      }
+    }
+
+    // Right scale border
+    ctx.strokeStyle = '#2a2e39';
+    ctx.beginPath();
+    ctx.moveTo(chartWidth, 0);
+    ctx.lineTo(chartWidth, height);
+    ctx.stroke();
+
+    // Bottom scale border
+    ctx.beginPath();
+    ctx.moveTo(0, chartHeight);
+    ctx.lineTo(width, chartHeight);
+    ctx.stroke();
+
+    // 2. Draw Candlesticks & Time Axis Ticks
+    const candleSpacing = Math.max(1, candleWidth * 0.22);
+    const bodyWidth = Math.max(1.2, candleWidth - candleSpacing);
+
+    const candleCoordinates: { index: number; x: number; candle: Candle }[] = [];
+
+    for (let i = startIndex; i <= safeEndIndex; i++) {
+      const c = candles[i];
+      if (!c) continue;
+
+      // Calculate center X coordinate of candle
+      const x = chartWidth - (rawEndIndex - i + 0.5) * candleWidth;
+      candleCoordinates.push({ index: i, x, candle: c });
+
+      // Clip rendering to visible area with buffer
+      if (x < -candleWidth || x > chartWidth + candleWidth) continue;
+
+      const isUp = c.close >= c.open;
+      const candleColor = isUp ? '#089981' : '#f23645'; // TradingView Bull Green / Bear Red
+
+      const openY = priceToY(c.open);
+      const closeY = priceToY(c.close);
+      const highY = priceToY(c.high);
+      const lowY = priceToY(c.low);
+
+      // Wick
+      ctx.strokeStyle = candleColor;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x, highY);
+      ctx.lineTo(x, lowY);
+      ctx.stroke();
+
+      // Body
+      const bodyTop = Math.min(openY, closeY);
+      const bodyHeight = Math.max(1.5, Math.abs(closeY - openY));
+
+      ctx.fillStyle = candleColor;
+      ctx.fillRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight);
+
+      // Time axis ticks
+      if (Math.round(x) % 85 < Math.round(candleWidth)) {
+        // Vertical grid line
+        ctx.strokeStyle = '#181c27';
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, chartHeight);
+        ctx.stroke();
+
+        // Time axis label
+        ctx.fillStyle = '#787b86';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const d = new Date(c.openTime);
+        const timeStr = timeframe.includes('d') || timeframe.includes('w') || timeframe.includes('M')
+          ? `${d.getUTCMonth() + 1}/${d.getUTCDate()}`
+          : `${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+        ctx.fillText(timeStr, x, chartHeight + 6);
+      }
+    }
+
+    // 3. Draw Market Structure (HH, HL, LH, LL, BOS, CHoCH)
+    if (showMarketStructure) {
+      const coordMap = new Map<number, number>();
+      candleCoordinates.forEach((item) => coordMap.set(item.index, item.x));
+
+      // Draw Structural Breaks (BOS / CHoCH horizontal lines)
+      marketStructure.structureBreaks.forEach((sb) => {
+        const originX = coordMap.get(sb.originIndex);
+        const breakX = coordMap.get(sb.breakIndex);
+
+        if (originX !== undefined || breakX !== undefined) {
+          const startX = originX !== undefined ? originX : 0;
+          const endX = breakX !== undefined ? breakX : chartWidth;
+          const y = priceToY(sb.originPrice);
+
+          if (y >= 0 && y <= chartHeight) {
+            const isBull = sb.direction === 'bullish';
+            const lineColor = sb.type === 'CHoCH'
+              ? '#38bdf8' // Cyan for CHoCH
+              : isBull ? '#34d399' : '#f87171'; // Green / Red for BOS
+
+            ctx.save();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = lineColor;
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(Math.max(0, startX), y);
+            ctx.lineTo(Math.min(chartWidth, endX), y);
+            ctx.stroke();
+            ctx.restore();
+
+            // Label badge
+            const midX = (Math.max(0, startX) + Math.min(chartWidth, endX)) / 2;
+            const label = `${sb.type}`;
+            ctx.font = 'bold 9px sans-serif';
+            const textWidth = ctx.measureText(label).width;
+
+            ctx.fillStyle = '#1e222d';
+            ctx.fillRect(midX - textWidth / 2 - 4, y - 7, textWidth + 8, 14);
+            ctx.strokeStyle = lineColor;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(midX - textWidth / 2 - 4, y - 7, textWidth + 8, 14);
+
+            ctx.fillStyle = lineColor;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, midX, y);
+          }
+        }
+      });
+
+      // Draw Swing Points (HH, HL, LH, LL)
+      marketStructure.swingPoints.forEach((sp) => {
+        const x = coordMap.get(sp.index);
+        if (x !== undefined && x >= 0 && x <= chartWidth) {
+          const y = priceToY(sp.price);
+          if (y >= 0 && y <= chartHeight) {
+            const isHigh = sp.isHigh;
+            const labelY = isHigh ? y - 10 : y + 12;
+
+            const isBullishType = sp.type === 'HH' || sp.type === 'HL';
+            const badgeBg = isBullishType ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.25)';
+            const badgeBorder = isBullishType ? '#10b981' : '#ef4444';
+            const badgeText = isBullishType ? '#34d399' : '#f87171';
+
+            ctx.font = 'bold 8.5px monospace';
+            const textWidth = ctx.measureText(sp.type).width;
+
+            ctx.fillStyle = badgeBg;
+            ctx.fillRect(x - textWidth / 2 - 3, labelY - 6, textWidth + 6, 12);
+            ctx.strokeStyle = badgeBorder;
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(x - textWidth / 2 - 3, labelY - 6, textWidth + 6, 12);
+
+            ctx.fillStyle = badgeText;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(sp.type, x, labelY);
+          }
+        }
+      });
+    }
+
+    // 4. Draw Current Live Market Price Line & Tag
+    const latestCandle = candles[candles.length - 1];
+    if (latestCandle) {
+      const currentPrice = latestCandle.close;
+      const currentY = priceToY(currentPrice);
+
+      if (currentY >= 0 && currentY <= chartHeight) {
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = '#2962ff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, currentY);
+        ctx.lineTo(chartWidth, currentY);
+        ctx.stroke();
+        ctx.restore();
+
+        // Right margin live price badge
+        ctx.fillStyle = '#2962ff';
+        ctx.fillRect(chartWidth + 1, currentY - 8, rightMargin - 2, 16);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 9.5px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(formatPrice(currentPrice), chartWidth + 5, currentY);
+      }
+    }
+
+    // 5. Crosshair on Mouse Hover
+    if (mousePos && mousePos.x >= 0 && mousePos.x <= chartWidth && mousePos.y >= 0 && mousePos.y <= chartHeight) {
+      ctx.save();
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = '#4c525e';
+      ctx.lineWidth = 1;
+
+      // Vertical line
+      ctx.beginPath();
+      ctx.moveTo(mousePos.x, 0);
+      ctx.lineTo(mousePos.x, chartHeight);
+      ctx.stroke();
+
+      // Horizontal line
+      ctx.beginPath();
+      ctx.moveTo(0, mousePos.y);
+      ctx.lineTo(chartWidth, mousePos.y);
+      ctx.stroke();
+      ctx.restore();
+
+      // Price tag on right axis
+      const crossPrice = yToPrice(mousePos.y);
+      ctx.fillStyle = '#363a45';
+      ctx.fillRect(chartWidth + 1, mousePos.y - 7, rightMargin - 2, 14);
+      ctx.fillStyle = '#d1d4dc';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(formatPrice(crossPrice), chartWidth + 5, mousePos.y);
+
+      // Time tag on bottom axis
+      const distFromRight = (chartWidth - mousePos.x) / candleWidth;
+      const hoveredIndex = Math.round(rawEndIndex - distFromRight + 0.5);
+      const hoveredCandle = candles[hoveredIndex];
+
+      if (hoveredCandle) {
+        const d = new Date(hoveredCandle.openTime);
+        const timeLabel = `${d.toLocaleDateString([], { month: 'numeric', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+        ctx.font = '9px monospace';
+        const tWidth = ctx.measureText(timeLabel).width;
+
+        ctx.fillStyle = '#363a45';
+        ctx.fillRect(mousePos.x - tWidth / 2 - 4, chartHeight + 1, tWidth + 8, 16);
+        ctx.fillStyle = '#d1d4dc';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(timeLabel, mousePos.x, chartHeight + 4);
+      }
+    }
+
+    // 6. Right scale interactive hints: Auto Button
+    if (!autoScale) {
+      ctx.fillStyle = '#1e222d';
+      ctx.fillRect(chartWidth + 5, chartHeight - 20, rightMargin - 10, 16);
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(chartWidth + 5, chartHeight - 20, rightMargin - 10, 16);
+
+      ctx.fillStyle = '#60a5fa';
+      ctx.font = 'bold 9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('AUTO', chartWidth + (rightMargin / 2), chartHeight - 12);
+    }
+
+    ctx.restore();
+  }, [
+    candles,
+    candleWidth,
+    panOffset,
+    priceOffset,
+    priceScaleRatio,
+    autoScale,
+    showMarketStructure,
+    mousePos,
+    timeframe,
+    marketStructure,
+    containerSize
+  ]);
+
+  // Current or inspected candle metrics for toolbar header
+  const latestCandle = candles[candles.length - 1] || null;
+  const isUp = latestCandle ? latestCandle.close >= latestCandle.open : true;
+  const changePercent = latestCandle
+    ? (((latestCandle.close - latestCandle.open) / latestCandle.open) * 100).toFixed(2)
+    : '0.00';
+
+  return (
+    <div
+      ref={containerRef}
+      onWheel={handleWheel}
+      className="flex flex-col h-full w-full bg-[#070709] text-slate-200 select-none overflow-hidden relative"
+    >
+      {/* Top Asset & Live Price Header */}
+      <div className="border-b border-[#181a24] bg-[#0c0d12] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+        {/* Left: Asset, Large Live Price & 24h Stats */}
+        <div className="flex items-center gap-3.5 flex-wrap">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-mono font-black text-base text-white">{symbol}</span>
+              <span className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.2 rounded font-mono font-bold">
+                BINANCE SPOT
+              </span>
+            </div>
+          </div>
+
+          {/* Large Live Price */}
+          <div className="flex items-baseline gap-2 pl-3 border-l border-[#1a1c27]">
+            <span className="font-mono font-black text-xl text-white tracking-tight">
+              {formatPrice(ticker?.lastPrice || (latestCandle ? latestCandle.close : '--'))}
+            </span>
+            <span
+              className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono font-bold ${
+                parseFloat(ticker?.priceChangePercent || changePercent) >= 0
+                  ? 'text-emerald-400 bg-emerald-500/10'
+                  : 'text-red-400 bg-red-500/10'
+              }`}
+            >
+              {parseFloat(ticker?.priceChangePercent || changePercent) >= 0 ? '+' : ''}
+              {ticker?.priceChangePercent || changePercent}%
+            </span>
+          </div>
+
+          {/* 24h High / Low / Volume */}
+          {ticker && ticker.highPrice !== '--' && (
+            <div className="hidden md:flex items-center gap-3 text-[11px] font-mono text-slate-400 pl-3 border-l border-[#1a1c27]">
+              <span>24h H: <strong className="text-slate-200">{formatPrice(ticker.highPrice)}</strong></span>
+              <span>24h L: <strong className="text-slate-200">{formatPrice(ticker.lowPrice)}</strong></span>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Timeframe Switcher, Market Structure Toggle, Zoom Controls */}
+        <div className="flex items-center gap-1.5 text-xs flex-wrap">
+          {/* Timeframe Quick Buttons */}
+          <div className="flex items-center bg-[#12131b] p-0.5 rounded border border-[#1e202d]">
+            {['1m', '5m', '15m', '1h', '4h', '1d'].map((tf) => (
+              <button
+                key={tf}
+                onClick={() => onTimeframeChange(tf as Timeframe)}
+                className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition cursor-pointer ${
+                  timeframe === tf
+                    ? 'bg-amber-500 text-black font-bold'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+
+          {/* Market Structure Toggle */}
+          <button
+            onClick={() => setShowMarketStructure((prev) => !prev)}
+            className={`flex items-center gap-1 px-2 py-1 rounded border text-xs font-mono transition-colors cursor-pointer ${
+              showMarketStructure
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 font-semibold'
+                : 'bg-[#12131b] text-slate-400 border-[#1e202d] hover:text-white'
+            }`}
+            title="Toggle NWWT Market Structure (HH, HL, LH, LL, BOS, CHoCH)"
+          >
+            <Layers className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden sm:inline">Structure</span>
+          </button>
+
+          {/* Auto Scale Reset */}
+          <button
+            onClick={() => {
+              setAutoScale(true);
+              setPriceOffset(0);
+              setPriceScaleRatio(1.0);
+            }}
+            className={`px-2 py-1 rounded text-[11px] font-mono font-semibold border transition-colors cursor-pointer ${
+              autoScale
+                ? 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+                : 'bg-[#12131b] text-slate-400 hover:text-white border-[#1e202d]'
+            }`}
+            title="Auto-fit price scale"
+          >
+            Auto
+          </button>
+
+          <button
+            onClick={() => handleZoom('in')}
+            className="p-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer"
+            title="Zoom In"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => handleZoom('out')}
+            className="p-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer"
+            title="Zoom Out"
+          >
+            <ZoomOut className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={handleResetView}
+            className="flex items-center gap-1 px-2 py-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer text-[11px] font-mono"
+            title="Reset Chart View"
+          >
+            <RotateCcw className="w-3 h-3 text-amber-400" />
+            <span className="hidden lg:inline">Reset</span>
+          </button>
+
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="p-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-400 hover:text-red-400 transition cursor-pointer ml-1"
+              title="Close Chart"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Real OHLC Bar */}
+      {latestCandle && (
+        <div className="px-3.5 py-1 bg-[#090a0e] border-b border-[#151722] flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono">
+          <div className="flex items-center gap-3">
+            <span>O: <span className="text-white font-medium">{formatPrice(latestCandle.open)}</span></span>
+            <span>H: <span className="text-emerald-400 font-medium">{formatPrice(latestCandle.high)}</span></span>
+            <span>L: <span className="text-red-400 font-medium">{formatPrice(latestCandle.low)}</span></span>
+            <span>
+              C: <span className={`font-semibold ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>{formatPrice(latestCandle.close)}</span>
+            </span>
+            <span className={`font-medium ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>
+              {isUp ? '+' : ''}{changePercent}%
+            </span>
+          </div>
+
+          {showMarketStructure && marketStructure.currentTrend !== 'neutral' && (
+            <span
+              className={`ml-auto px-1.5 py-0.2 rounded text-[10px] uppercase font-bold flex items-center gap-1 ${
+                marketStructure.currentTrend === 'bullish'
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-red-500/20 text-red-400 border border-red-500/30'
+              }`}
+            >
+              {marketStructure.currentTrend === 'bullish' ? (
+                <TrendingUp className="w-3 h-3" />
+              ) : (
+                <TrendingDown className="w-3 h-3" />
+              )}
+              {marketStructure.currentTrend} Structure
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Main Interactive Canvas Area */}
+      <div className="flex-1 relative overflow-hidden w-full h-full min-h-[350px]">
+        {isLoading && (
+          <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
+            <div className="flex flex-col items-center gap-2">
+              <Activity className="w-6 h-6 text-amber-500 animate-spin" />
+              <span className="text-xs text-slate-300 font-mono">Loading Binance historical candles...</span>
+            </div>
+          </div>
+        )}
+
+        {!isLoading && !fetchError && candles.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center p-4 bg-[#070709]/80 z-10 text-center">
+            <div className="max-w-sm space-y-2 p-4 rounded-lg bg-[#0c0d12] border border-[#1e202d] shadow-xl">
+              <div className="text-amber-400 text-sm font-semibold flex items-center justify-center gap-1.5">
+                Waiting for Binance Trades
+              </div>
+              <div className="text-xs text-slate-400">
+                No historical klines recorded on Binance for <span className="font-mono text-slate-200">{symbol}</span> yet.
+                The live chart will start updating as trades arrive.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {fetchError && (
+          <div className="absolute inset-0 flex items-center justify-center p-4 bg-[#070709]/90 z-10 text-center">
+            <div className="max-w-xs space-y-2">
+              <div className="text-red-400 text-sm font-semibold">Failed to load candles</div>
+              <div className="text-xs text-slate-400">{fetchError}</div>
+              <button
+                onClick={handleManualRetry}
+                className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-black font-bold rounded text-xs transition-colors cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
+
+        <canvas
+          ref={canvasRef}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
+          onDoubleClick={handleDoubleClick}
+          style={{ cursor: cursorStyle }}
+          className="absolute inset-0 w-full h-full block touch-none"
+        />
+      </div>
+
+      {/* Footer Navigation Tip */}
+      <div className="px-3 py-0.5 bg-[#181c27] border-t border-[#2a2e39] flex items-center justify-between text-[10px] text-slate-500 font-mono">
+        <div className="flex items-center gap-2">
+          <span>Pan: Drag chart</span>
+          <span>•</span>
+          <span>Zoom: Wheel / Pinch</span>
+          <span>•</span>
+          <span>Scale Price: Drag right axis</span>
+        </div>
+        <div>
+          <span>Candles: {candles.length}</span>
+        </div>
+      </div>
+
+      {/* Modular AI Chart Scanner Foundation */}
+      <ChartScanner
+        asset={symbol}
+        symbol={symbol}
+        timeframe={timeframe}
+        candles={candles}
+        volume={{
+          latestCandleVolume: candles.length > 0 ? candles[candles.length - 1].volume : 0,
+          total24hVolume: ticker?.volume || '0',
+          quoteVolume: ticker?.quoteVolume
+        }}
+        marketStructure={marketStructure}
+        currentPrice={
+          candles.length > 0
+            ? candles[candles.length - 1].close
+            : ticker?.lastPrice && ticker.lastPrice !== '--'
+            ? parseFloat(ticker.lastPrice)
+            : 0
+        }
+        ticker={ticker}
+      />
+    </div>
+  );
+};
+
+export default CandlestickChart;
