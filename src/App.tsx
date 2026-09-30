@@ -15,6 +15,7 @@
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useWeexMarket } from './hooks/useWeexMarket.ts';
+import { useSignalPerformance } from './hooks/useSignalPerformance.ts';
 import { Header, NavTab } from './components/Header.tsx';
 import { WatchlistToolbar } from './components/WatchlistToolbar.tsx';
 import { WatchlistTable } from './components/WatchlistTable.tsx';
@@ -34,6 +35,13 @@ export default function App() {
     triggerScan,
     reconnectBackend
   } = useWeexMarket();
+
+  // V8 Signal Performance Engine
+  const {
+    signals: performanceSignals,
+    stats: performanceStats,
+    clearHistory
+  } = useSignalPerformance(scannerState.signals, tickersMap);
 
   // Navigation Target State
   const [activeTab, setActiveTab] = useState<NavTab>('watchlist');
@@ -176,6 +184,16 @@ export default function App() {
     };
   }, [selectedSymbolName, tickersList, tickersMap]);
 
+  // Active signal for currently selected asset
+  const activeSignalForAsset = useMemo(() => {
+    if (!selectedSymbolName) return null;
+    return (
+      performanceSignals.find((s) => s.asset === selectedSymbolName && s.status === 'ACTIVE') ||
+      performanceSignals.find((s) => s.asset === selectedSymbolName) ||
+      null
+    );
+  }, [performanceSignals, selectedSymbolName]);
+
   // Open asset chart on asset click (used by Watchlist & Scanner)
   const handleSelectAsset = useCallback((symbol: string) => {
     setSelectedSymbolName(symbol);
@@ -266,6 +284,9 @@ export default function App() {
                 onSelectAsset={handleSelectAsset}
                 onTimeframeChange={(tf) => setSelectedTimeframe(tf)}
                 onTriggerScan={(tf) => triggerScan(tf || selectedTimeframe)}
+                performanceSignals={performanceSignals}
+                performanceStats={performanceStats}
+                onClearHistory={clearHistory}
               />
             )}
           </div>
@@ -279,6 +300,9 @@ export default function App() {
             ticker={selectedTicker}
             timeframe={selectedTimeframe}
             onTimeframeChange={setSelectedTimeframe}
+            onSelectSymbol={handleSelectAsset}
+            allSymbols={tickersList}
+            activeSignal={activeSignalForAsset}
           />
         </section>
       </div>
@@ -314,6 +338,9 @@ export default function App() {
               onSelectAsset={handleSelectAsset}
               onTimeframeChange={(tf) => setSelectedTimeframe(tf)}
               onTriggerScan={(tf) => triggerScan(tf || selectedTimeframe)}
+              performanceSignals={performanceSignals}
+              performanceStats={performanceStats}
+              onClearHistory={clearHistory}
             />
           </div>
         )}
@@ -326,6 +353,9 @@ export default function App() {
               ticker={selectedTicker}
               timeframe={selectedTimeframe}
               onTimeframeChange={setSelectedTimeframe}
+              onSelectSymbol={handleSelectAsset}
+              allSymbols={tickersList}
+              activeSignal={activeSignalForAsset}
             />
           </div>
         )}

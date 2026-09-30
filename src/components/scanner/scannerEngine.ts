@@ -448,12 +448,12 @@ export function runChartScan(
       reason = `Price attempted to break resistance ($${resistanceLevel.toFixed(2)}), but volume is contracting (${(volRatio * 100).toFixed(0)}% of 20MA) with rejection wick. Unconfirmed breakout; high fakeout risk.`;
       invalidationLevel = supportLevel;
     }
-    // Setup A: Confirmed Bullish Break-and-Retest
+    // Setup A: Confirmed Bullish Break-and-Retest (Reinforced setup)
     else if (isBullishBreakAndRetest && (hasBullishPattern || hasSupportRejectionWick || c0IsGreen)) {
       signal = 'UP';
-      setupQuality = isVolumeExpansion ? 'HIGH' : 'MODERATE';
+      setupQuality = 'HIGH';
       keyPriceArea = `Retest Support at $${breakRetestLevel.toFixed(2)}`;
-      reason = `Confirmed Break-and-Retest in Bullish Trend: Previous resistance ($${breakRetestLevel.toFixed(2)}) was defended as new support with ${hasBullishPattern ? primaryPattern.name : 'lower wick rejection'} and ${volumeCondition}.`;
+      reason = `Confirmed Break-and-Retest (Reinforced): Previous resistance ($${breakRetestLevel.toFixed(2)}) was defended on retest as new support with ${hasBullishPattern ? primaryPattern.name : 'lower wick rejection'}. Retest strongly reinforces trend continuation.`;
       invalidationLevel = Math.min(c0.low, breakRetestLevel * 0.995);
     }
     // Setup B: Pullback to Support / Higher Low in Bullish Trend
@@ -464,12 +464,12 @@ export function runChartScan(
       reason = `Bullish Trend Continuation: Pullback held at verified support ($${supportLevel.toFixed(2)}) with ${hasBullishPattern ? primaryPattern.name : 'support defense'} and ${volumeCondition}.`;
       invalidationLevel = Math.min(c0.low, supportLevel * 0.995);
     }
-    // Setup C: Supported Breakout with Volume Expansion
-    else if (isFreshBullishBreakout && isVolumeExpansion && !isVolumeDisagreement && c0IsGreen) {
+    // Setup C: Strong Confirmed Breakout (Retest Optional)
+    else if (isFreshBullishBreakout && c0IsGreen) {
       signal = 'UP';
-      setupQuality = 'MODERATE';
+      setupQuality = isVolumeExpansion ? 'HIGH' : 'MODERATE';
       keyPriceArea = `Breakout Zone at $${resistanceLevel.toFixed(2)}`;
-      reason = `Supported Bullish Breakout: Candle closed above resistance ($${resistanceLevel.toFixed(2)}) backed by expanding volume (${(volRatio * 100).toFixed(0)}% of 20MA).`;
+      reason = `Strong Confirmed Breakout: Closed candle broke firmly above resistance ($${resistanceLevel.toFixed(2)}) with decisive bullish momentum. Retest is optional.`;
       invalidationLevel = resistanceLevel * 0.994;
     }
     // Setup D: Trend Continuation Impulse
@@ -518,12 +518,12 @@ export function runChartScan(
       reason = `Price pushed below support ($${supportLevel.toFixed(2)}), but volume is contracting with lower wick rejection. Unconfirmed breakdown; high bear-trap risk.`;
       invalidationLevel = resistanceLevel;
     }
-    // Setup A: Confirmed Bearish Breakdown-and-Retest
+    // Setup A: Confirmed Bearish Breakdown-and-Retest (Reinforced setup)
     else if (isBearishBreakAndRetest && (hasBearishPattern || hasResistanceRejectionWick || !c0IsGreen)) {
       signal = 'DOWN';
-      setupQuality = isVolumeExpansion ? 'HIGH' : 'MODERATE';
+      setupQuality = 'HIGH';
       keyPriceArea = `Retest Resistance at $${breakRetestLevel.toFixed(2)}`;
-      reason = `Confirmed Breakdown-and-Retest in Bearish Trend: Previous support ($${breakRetestLevel.toFixed(2)}) was rejected as new resistance with ${hasBearishPattern ? primaryPattern.name : 'upper wick rejection'} and ${volumeCondition}.`;
+      reason = `Confirmed Breakdown-and-Retest (Reinforced): Previous support ($${breakRetestLevel.toFixed(2)}) was rejected on retest as new resistance with ${hasBearishPattern ? primaryPattern.name : 'upper wick rejection'}. Retest strongly reinforces trend continuation.`;
       invalidationLevel = Math.max(c0.high, breakRetestLevel * 1.005);
     }
     // Setup B: Rally to Resistance / Lower High in Bearish Trend
@@ -534,12 +534,12 @@ export function runChartScan(
       reason = `Bearish Trend Continuation: Relief rally stalled at verified resistance ($${resistanceLevel.toFixed(2)}) with ${hasBearishPattern ? primaryPattern.name : 'supply rejection'} and ${volumeCondition}.`;
       invalidationLevel = Math.max(c0.high, resistanceLevel * 1.005);
     }
-    // Setup C: Supported Breakdown with Volume Expansion
-    else if (isFreshBearishBreakout && isVolumeExpansion && !isVolumeDisagreement && !c0IsGreen) {
+    // Setup C: Strong Confirmed Breakdown (Retest Optional)
+    else if (isFreshBearishBreakout && !c0IsGreen) {
       signal = 'DOWN';
-      setupQuality = 'MODERATE';
+      setupQuality = isVolumeExpansion ? 'HIGH' : 'MODERATE';
       keyPriceArea = `Breakdown Zone at $${supportLevel.toFixed(2)}`;
-      reason = `Supported Bearish Breakdown: Candle closed below support ($${supportLevel.toFixed(2)}) backed by expanding volume (${(volRatio * 100).toFixed(0)}% of 20MA).`;
+      reason = `Strong Confirmed Breakdown: Closed candle broke firmly below support ($${supportLevel.toFixed(2)}) with decisive bearish momentum. Retest is optional.`;
       invalidationLevel = supportLevel * 1.006;
     }
     // Setup D: Trend Continuation Downward Impulse

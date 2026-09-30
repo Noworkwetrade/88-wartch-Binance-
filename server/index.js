@@ -105,6 +105,10 @@ app.get('/api/scanner', (req, res) => {
   res.json(scannerService.getScanData());
 });
 
+app.get('/api/scanner/performance', (req, res) => {
+  res.json(scannerService.computePerformanceStats());
+});
+
 app.post('/api/reconnect', async (req, res) => {
   try {
     binanceSocket.connect();

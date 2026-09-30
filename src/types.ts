@@ -100,7 +100,9 @@ export interface MarketStructureResult {
   currentTrend: 'bullish' | 'bearish' | 'neutral';
 }
 
-// NWWT Scanner Signal Definitions (UP / DOWN only)
+// NWWT Scanner Signal Definitions (UP / DOWN only) with V8 Performance Engine
+export type SignalStatus = 'ACTIVE' | 'WIN' | 'LOSS' | 'EXPIRED';
+
 export interface ScannerSignalItem {
   id: string;
   asset: string;
@@ -108,10 +110,23 @@ export interface ScannerSignalItem {
   direction: 'UP' | 'DOWN';
   setupType: string;
   signalPrice: number;
+  entryPrice: number;
+  takeProfit: number;
+  stopLoss: number;
   invalidationLevel: number;
   confidence: number;
   reason: string;
   timestamp: number;
+  // V8 Performance Engine Fields
+  status: SignalStatus;
+  statusReason?: string;
+  completedAt?: number;
+  exitPrice?: number;
+  pnlPercent?: number;
+  expiryCandles: number;
+  expiryTimestamp: number;
+  highestReached?: number;
+  lowestReached?: number;
 }
 
 export interface PendingRetestItem {
@@ -123,6 +138,33 @@ export interface PendingRetestItem {
   note: string;
 }
 
+export interface SetupPerformance {
+  total: number;
+  wins: number;
+  losses: number;
+  expired: number;
+  active: number;
+  tpRate: number; // Win rate %
+  avgPnlPercent: number;
+}
+
+export interface SignalPerformanceStats {
+  totalSignals: number;
+  activeCount: number;
+  completedCount: number;
+  winsCount: number;
+  lossesCount: number;
+  expiredCount: number;
+  tpRate: number; // (wins / (wins + losses)) * 100
+  avgWinPercent: number;
+  avgLossPercent: number;
+  profitFactor: number;
+  bySetupType: Record<string, SetupPerformance>;
+  byTimeframe: Record<string, SetupPerformance>;
+  byDirection: Record<'UP' | 'DOWN', SetupPerformance>;
+  byAsset: Record<string, SetupPerformance>;
+}
+
 export interface ScannerState {
   status: 'ready' | 'scanning' | 'idle';
   timeframe: Timeframe;
@@ -131,4 +173,5 @@ export interface ScannerState {
   lastScanTime: number;
   signals: ScannerSignalItem[];
   pendingRetests: PendingRetestItem[];
+  performance?: SignalPerformanceStats;
 }
