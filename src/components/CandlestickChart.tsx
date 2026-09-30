@@ -24,17 +24,26 @@ import {
   ZoomIn,
   ZoomOut,
   ChevronDown,
+  ChevronUp,
   Layers,
   SlidersHorizontal,
   TrendingUp,
   TrendingDown,
   Activity,
+  Maximize2,
+  Minimize2,
+  Search,
+  Sparkles,
+  Shield,
+  Target,
+  Info,
   X
 } from 'lucide-react';
 import { Candle, Timeframe, TickerData, MarketStructureResult, ScannerSignalItem } from '../types.ts';
 import { calculateMarketStructure, getTimeframeDurationMs } from '../utils/marketStructure.ts';
 import { formatPrice } from './WatchlistTable.tsx';
-import { ChartScanner } from './scanner/ChartScanner.tsx';
+import { runChartScan } from './scanner/scannerEngine.ts';
+import { ScannerAnalysisResult } from './scanner/types.ts';
 
 interface CandlestickChartProps {
   symbol: string;
@@ -187,6 +196,49 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
   // Timeframe dropdown state
   const [isTfDropdownOpen, setIsTfDropdownOpen] = useState<boolean>(false);
+
+  // Full Screen Chart Toggle (Instruction 4)
+  const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
+
+  // Scan Market specifically for active chart asset (Instruction 7)
+  const [isScanningAsset, setIsScanningAsset] = useState<boolean>(false);
+  const [scanFeedback, setScanFeedback] = useState<string | null>(null);
+
+  // Progressive Disclosure Accordions (Instruction 6)
+  const [isStructureDetailsOpen, setIsStructureDetailsOpen] = useState<boolean>(true);
+  const [isPriceActionOpen, setIsPriceActionOpen] = useState<boolean>(false);
+  const [isPatternsOpen, setIsPatternsOpen] = useState<boolean>(false);
+
+  const handleScanChartAsset = useCallback(async () => {
+    setIsScanningAsset(true);
+    setScanFeedback(`Scanning ${symbol} (${timeframe}) with live market candles...`);
+    try {
+      const res = await fetch('/api/scanner/scan-asset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, timeframe })
+      });
+      const data = await res.json();
+      if (data && data.result) {
+        if (data.result.signal) {
+          setScanFeedback(`Setup Identified on ${symbol}: ${data.result.signal.direction} (${data.result.signal.setupType})`);
+        } else if (data.result.pendingRetest) {
+          setScanFeedback(`Retest Detected on ${symbol}: Pulling back to $${formatPrice(data.result.pendingRetest.targetLevel)}`);
+        } else {
+          setScanFeedback(`Scan Complete on ${symbol} (${timeframe}): No confirmed setup. Waiting for break or retest.`);
+        }
+      } else {
+        setScanFeedback(`Scan complete for ${symbol}.`);
+      }
+    } catch (err: any) {
+      setScanFeedback(`Scan error for ${symbol}: ${err.message || 'Check connection'}`);
+    } finally {
+      setIsScanningAsset(false);
+      setTimeout(() => {
+        setScanFeedback(null);
+      }, 7000);
+    }
+  }, [symbol, timeframe]);
 
   // Container dimensions from ResizeObserver
   const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
@@ -370,6 +422,27 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const marketStructure: MarketStructureResult = useMemo(() => {
     return calculateMarketStructure(candles, swingSensitivity);
   }, [candles, swingSensitivity]);
+
+  const currentPriceVal = useMemo(() => {
+    if (candles.length > 0) return candles[candles.length - 1].close;
+    if (ticker?.lastPrice && ticker.lastPrice !== '--') return parseFloat(ticker.lastPrice);
+    return 0;
+  }, [candles, ticker]);
+
+  const scanResult: ScannerAnalysisResult = useMemo(() => {
+    return runChartScan(
+      symbol,
+      timeframe,
+      candles,
+      {
+        latestCandleVolume: candles.length > 0 ? candles[candles.length - 1].volume : 0,
+        total24hVolume: ticker?.volume || '0',
+        quoteVolume: ticker?.quoteVolume
+      },
+      marketStructure,
+      currentPriceVal
+    );
+  }, [symbol, timeframe, candles, marketStructure, currentPriceVal, ticker]);
 
   // Reset View to latest price & auto-scale
   const handleResetView = useCallback(() => {
@@ -854,8 +927,27 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       }
 
       // Draw Swing Points (HH, HL, LH, LL markers) if enabled
+      // Prioritize meaningful structural pivot points instead of flooding the chart with every small movement
       if (showStructureMarkers) {
-        marketStructure.swingPoints.forEach((sp) => {
+        const breakOrigins = new Set(marketStructure.structureBreaks.map((sb) => sb.originIndex));
+
+        // Filter to visible swing points on current canvas view
+        const visiblePoints = marketStructure.swingPoints.filter((sp) => {
+          const x = coordMap.get(sp.index);
+          return x !== undefined && x >= 0 && x <= chartWidth;
+        });
+
+        // Prioritize key structure breaks and latest structural extremes (up to 8 points)
+        const meaningfulPoints = [...visiblePoints]
+          .sort((a, b) => {
+            const aBreak = breakOrigins.has(a.index) ? 1 : 0;
+            const bBreak = breakOrigins.has(b.index) ? 1 : 0;
+            if (aBreak !== bBreak) return bBreak - aBreak;
+            return b.index - a.index;
+          })
+          .slice(0, 8);
+
+        meaningfulPoints.forEach((sp) => {
           const x = coordMap.get(sp.index);
           if (x !== undefined && x >= 0 && x <= chartWidth) {
             const y = priceToY(sp.price);
@@ -1046,16 +1138,309 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     ? (((latestCandle.close - latestCandle.open) / latestCandle.open) * 100).toFixed(2)
     : '0.00';
 
+  // 1. FULL SCREEN CHART MODE (Instruction 4)
+  if (isFullScreen) {
+    return (
+      <div
+        ref={containerRef}
+        onWheel={handleWheel}
+        className="fixed inset-0 z-50 bg-[#070709] text-slate-200 select-none overflow-hidden flex flex-col"
+      >
+        {/* Fullscreen Top Navigation Bar */}
+        <div className="border-b border-[#181a24] bg-[#0c0d12] px-3.5 py-2 flex items-center justify-between gap-2 text-xs shrink-0">
+          <div className="flex items-center gap-3">
+            <span className="font-mono font-bold text-white text-base tracking-tight">{symbol}</span>
+            <span className="font-mono font-black text-base text-white">
+              ${formatPrice(ticker?.lastPrice || (latestCandle ? latestCandle.close : '--'))}
+            </span>
+            <span
+              className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono font-bold ${
+                parseFloat(ticker?.priceChangePercent || changePercent) >= 0
+                  ? 'text-emerald-400 bg-emerald-500/10'
+                  : 'text-red-400 bg-red-500/10'
+              }`}
+            >
+              {parseFloat(ticker?.priceChangePercent || changePercent) >= 0 ? '+' : ''}
+              {ticker?.priceChangePercent || changePercent}%
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {/* Timeframe selector */}
+            <div className="flex items-center bg-[#12131b] p-0.5 rounded border border-[#1e202d]">
+              {['1m', '5m', '15m', '1h', '4h', '1d'].map((tf) => (
+                <button
+                  key={tf}
+                  onClick={() => onTimeframeChange(tf as Timeframe)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition cursor-pointer ${
+                    timeframe === tf
+                      ? 'bg-amber-500 text-black font-bold'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {tf}
+                </button>
+              ))}
+            </div>
+
+            {/* Auto Scale Button */}
+            <button
+              onClick={() => {
+                setAutoScale(true);
+                setPriceOffset(0);
+                setPriceScaleRatio(1.0);
+              }}
+              className="px-2 py-1 rounded text-[11px] font-mono font-semibold bg-[#12131b] border border-[#1e202d] text-slate-300 hover:text-white cursor-pointer"
+            >
+              Auto
+            </button>
+
+            {/* Exit Full Screen Button */}
+            <button
+              onClick={() => setIsFullScreen(false)}
+              className="flex items-center gap-1 px-3 py-1 rounded bg-amber-500 hover:bg-amber-400 text-black font-mono font-bold text-xs shadow transition cursor-pointer ml-1"
+              title="Exit Full Screen"
+            >
+              <Minimize2 className="w-3.5 h-3.5" />
+              <span>Exit</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Active Signal HUD Banner */}
+        {activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && (
+          <div className="px-3.5 py-1 bg-[#0d0f18] border-b border-[#1c1f2e] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shrink-0">
+            <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1 font-bold text-amber-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                Setup: {activeSignal.direction} ({activeSignal.setupType})
+              </span>
+              <span className="text-slate-400">
+                Entry: <strong className="text-white">${formatPrice(activeSignal.entryPrice)}</strong>
+              </span>
+              <span className="text-slate-400">
+                TP: <strong className="text-emerald-400">${formatPrice(activeSignal.takeProfit)}</strong>
+              </span>
+              <span className="text-slate-400">
+                SL: <strong className="text-red-400">${formatPrice(activeSignal.stopLoss)}</strong>
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                WATCHING LIVE
+              </span>
+              <span className="text-[10px] text-slate-500">{activeSignal.confidence}% Conf.</span>
+            </div>
+          </div>
+        )}
+
+        {/* Fullscreen Canvas Area */}
+        <div className="flex-1 relative overflow-hidden w-full h-full">
+          {isLoading && (
+            <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
+              <div className="flex flex-col items-center gap-2">
+                <Activity className="w-6 h-6 text-amber-500 animate-spin" />
+                <span className="text-xs text-slate-300 font-mono">Loading market chart data...</span>
+              </div>
+            </div>
+          )}
+
+          <canvas
+            ref={canvasRef}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+            onPointerLeave={handlePointerLeave}
+            onDoubleClick={handleDoubleClick}
+            style={{ cursor: cursorStyle }}
+            className="absolute inset-0 w-full h-full block touch-none"
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // 2. STANDARD COMPACT MODE (Requirements 3, 4, 6)
   return (
     <div
       ref={containerRef}
       onWheel={handleWheel}
-      className="flex flex-col h-full w-full bg-[#070709] text-slate-200 select-none overflow-hidden relative"
+      className="flex flex-col h-full w-full bg-[#070709] text-slate-200 select-none overflow-y-auto lg:overflow-hidden relative pb-24 lg:pb-0 overscroll-contain"
     >
-      {/* Top Asset & Live Price Header */}
-      <div className="border-b border-[#181a24] bg-[#0c0d12] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-        {/* Left: Asset Selector Dropdown, Large Live Price & 24h Stats */}
-        <div className="flex items-center gap-3 flex-wrap">
+      {/* ============================================================== */}
+      {/* 1. NWWT STRUCTURE SCANNER (Top of Chart Experience - Requirement 3) */}
+      {/* ============================================================== */}
+      <div className="border-b border-[#181a24] bg-[#0c0e15] px-3 sm:px-3.5 py-2 sm:py-2.5 flex flex-col gap-2 shrink-0">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="w-5 h-5 rounded bg-amber-500/10 border border-amber-500/40 flex items-center justify-center font-black text-amber-400 text-[10px]">
+              NW
+            </div>
+            <span className="font-extrabold text-xs tracking-wider text-white font-mono uppercase">
+              NWWT Structure Scanner
+            </span>
+            <span
+              className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold uppercase ${
+                marketStructure.currentTrend === 'bullish'
+                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                  : marketStructure.currentTrend === 'bearish'
+                  ? 'bg-red-500/15 text-red-400 border border-red-500/30'
+                  : 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
+              }`}
+            >
+              {marketStructure.currentTrend} Structure
+            </span>
+
+            {/* Signal Badge */}
+            <span
+              className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold uppercase border flex items-center gap-1 ${
+                scanResult.decision.signal === 'UP'
+                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                  : scanResult.decision.signal === 'DOWN'
+                  ? 'bg-red-500/15 text-red-400 border border-red-500/30'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+              }`}
+            >
+              {scanResult.decision.signal === 'UP' && <TrendingUp className="w-3 h-3 text-emerald-400" />}
+              {scanResult.decision.signal === 'DOWN' && <TrendingDown className="w-3 h-3 text-red-400" />}
+              <span>{scanResult.decision.signal}</span>
+            </span>
+
+            {scanResult.decision.setupQuality !== 'NONE' && (
+              <span className="px-1.5 py-0.2 rounded text-[9.5px] font-mono uppercase font-semibold bg-[#141724] text-slate-400 border border-[#23273c] hidden sm:inline">
+                {scanResult.decision.setupQuality}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Dedicated Scan Market Button (Requirement 7) */}
+            <button
+              onClick={handleScanChartAsset}
+              disabled={isScanningAsset}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 active:scale-95 text-black font-mono font-bold text-xs shadow-sm transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              title={`Scan market structure on ${symbol} (${timeframe})`}
+            >
+              <Search className={`w-3 h-3 ${isScanningAsset ? 'animate-spin' : ''}`} />
+              <span>Scan Market</span>
+              <span className="text-[9.5px] bg-black/20 text-black px-1 rounded font-bold">
+                {symbol.replace(/USDT$/, '')}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Setup Condition Display (Answers "Is there a setup?" - Requirement 6) */}
+        {activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice ? (
+          <div className="p-2 rounded bg-[#10131d] border border-amber-500/30 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                  activeSignal.direction === 'UP'
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                    : 'bg-red-500/20 text-red-400 border border-red-500/40'
+                }`}
+              >
+                {activeSignal.direction === 'UP' ? 'LONG SETUP' : 'SHORT SETUP'}
+              </span>
+              <span className="font-semibold text-white">{activeSignal.setupType}</span>
+              <span className="text-slate-400">
+                Entry: <strong className="text-white">${formatPrice(activeSignal.entryPrice)}</strong>
+              </span>
+              <span className="text-slate-400">
+                TP: <strong className="text-emerald-400">${formatPrice(activeSignal.takeProfit)}</strong>
+              </span>
+              <span className="text-slate-400">
+                SL: <strong className="text-red-400">${formatPrice(activeSignal.stopLoss)}</strong>
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                WATCHING LIVE
+              </span>
+              <span className="text-[10px] text-slate-400">{activeSignal.confidence}% Conf.</span>
+            </div>
+          </div>
+        ) : (
+          <div className="p-2 rounded bg-[#0e1017] border border-[#1c1f2e] text-[11px] font-mono text-slate-400 flex items-center justify-between gap-2">
+            <span>
+              Market Structure: <strong className="text-slate-200 capitalize">{marketStructure.currentTrend}</strong>. {scanResult.decision.signal === 'NO SETUP' ? `No active setup on ${timeframe}. Monitoring for breakout confirmation.` : `Setup identified: ${scanResult.decision.signal} (${scanResult.decision.setupQuality} Quality).`}
+            </span>
+            <button
+              onClick={() => setIsStructureDetailsOpen((prev) => !prev)}
+              className="text-amber-400 hover:text-amber-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+            >
+              <span>{isStructureDetailsOpen ? 'Hide Details' : 'Show Details'}</span>
+              {isStructureDetailsOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </button>
+          </div>
+        )}
+
+        {/* Scan Feedback Banner */}
+        {scanFeedback && (
+          <div className="px-2.5 py-1 rounded bg-[#131724] border border-amber-500/30 text-amber-300 text-[11px] font-mono flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 overflow-hidden">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="truncate">{scanFeedback}</span>
+            </div>
+            <button onClick={() => setScanFeedback(null)} className="text-slate-400 hover:text-white p-0.5">
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+
+        {/* Progressive Disclosure: Structured Evidence Grid (Requirement 6) */}
+        {isStructureDetailsOpen && (
+          <div className="pt-1.5 space-y-2">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 text-xs font-mono">
+              <div className="p-1.5 rounded bg-[#080a0f] border border-[#181a24]">
+                <div className="text-[9px] text-slate-500 uppercase">Regime</div>
+                <div className="font-bold text-[10px] uppercase truncate text-amber-400">
+                  {scanResult.decision.marketCondition}
+                </div>
+              </div>
+              <div className="p-1.5 rounded bg-[#080a0f] border border-[#181a24]">
+                <div className="text-[9px] text-slate-500 uppercase">Structure</div>
+                <div className="text-slate-200 font-semibold text-[10px] truncate">
+                  {scanResult.decision.marketStructure}
+                </div>
+              </div>
+              <div className="p-1.5 rounded bg-[#080a0f] border border-[#181a24]">
+                <div className="text-[9px] text-slate-500 uppercase">Trend</div>
+                <div className="text-slate-200 font-semibold text-[10px] truncate">
+                  {scanResult.decision.trendCondition}
+                </div>
+              </div>
+              <div className="p-1.5 rounded bg-[#080a0f] border border-[#181a24]">
+                <div className="text-[9px] text-slate-500 uppercase">Volume</div>
+                <div className="text-slate-200 font-semibold text-[10px] truncate">
+                  {scanResult.decision.volumeCondition}
+                </div>
+              </div>
+              <div className="p-1.5 rounded bg-[#080a0f] border border-[#181a24] col-span-2 sm:col-span-1">
+                <div className="text-[9px] text-slate-500 uppercase">Key Level</div>
+                <div className="text-slate-200 font-semibold text-[10px] truncate">
+                  {scanResult.decision.keyPriceArea}
+                </div>
+              </div>
+            </div>
+            {scanResult.decision.reason && (
+              <p className="text-[10.5px] text-slate-400 font-mono leading-relaxed bg-[#080a0f] p-2 rounded border border-[#181a24]">
+                {scanResult.decision.reason}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ============================================================== */}
+      {/* 2. ASSET AND PRICE (Requirement 3) */}
+      {/* ============================================================== */}
+      <div className="border-b border-[#181a24] bg-[#0c0d12] px-3 sm:px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
+        <div className="flex items-center gap-3">
           {/* Asset Dropdown Selector */}
           <div className="relative" ref={assetDropdownRef}>
             <button
@@ -1073,7 +1458,6 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             {/* Asset Dropdown Menu */}
             {isAssetDropdownOpen && (
               <div className="absolute left-0 top-full mt-1.5 w-72 sm:w-80 bg-[#0c0e14] border border-[#262a3d] rounded-lg shadow-2xl z-50 overflow-hidden flex flex-col">
-                {/* Search Bar inside Dropdown */}
                 <div className="p-2 border-b border-[#1c1f2e] bg-[#0a0c12]">
                   <input
                     type="text"
@@ -1085,7 +1469,6 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                   />
                 </div>
 
-                {/* Scrollable list with all text clearly visible */}
                 <div className="max-h-72 overflow-y-auto divide-y divide-[#151824]">
                   {filteredDropdownSymbols.length === 0 ? (
                     <div className="p-3 text-center text-xs text-slate-500 font-mono">
@@ -1119,7 +1502,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
                           <div className="flex items-center gap-2 text-right font-mono">
                             <span className="text-xs font-semibold text-white">
-                              {formatPrice(item.lastPrice)}
+                              ${formatPrice(item.lastPrice)}
                             </span>
                             <span
                               className={`text-[10px] font-bold px-1.5 py-0.2 rounded min-w-[50px] text-right ${
@@ -1140,14 +1523,10 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             )}
           </div>
 
-          <span className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.2 rounded font-mono font-bold hidden sm:inline">
-            BINANCE SPOT
-          </span>
-
           {/* Large Live Price */}
           <div className="flex items-baseline gap-2 pl-3 border-l border-[#1a1c27]">
             <span className="font-mono font-black text-xl text-white tracking-tight">
-              {formatPrice(ticker?.lastPrice || (latestCandle ? latestCandle.close : '--'))}
+              ${formatPrice(ticker?.lastPrice || (latestCandle ? latestCandle.close : '--'))}
             </span>
             <span
               className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono font-bold ${
@@ -1160,35 +1539,40 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               {ticker?.priceChangePercent || changePercent}%
             </span>
           </div>
-
-          {/* 24h High / Low / Volume */}
-          {ticker && ticker.highPrice !== '--' && (
-            <div className="hidden md:flex items-center gap-3 text-[11px] font-mono text-slate-400 pl-3 border-l border-[#1a1c27]">
-              <span>24h H: <strong className="text-slate-200">{formatPrice(ticker.highPrice)}</strong></span>
-              <span>24h L: <strong className="text-slate-200">{formatPrice(ticker.lowPrice)}</strong></span>
-            </div>
-          )}
         </div>
 
-        {/* Right: Timeframe Switcher, Market Structure Toggle, Zoom Controls */}
-        <div className="flex items-center gap-1.5 text-xs flex-wrap">
-          {/* Timeframe Quick Buttons */}
-          <div className="flex items-center bg-[#12131b] p-0.5 rounded border border-[#1e202d]">
-            {['1m', '5m', '15m', '1h', '4h', '1d'].map((tf) => (
-              <button
-                key={tf}
-                onClick={() => onTimeframeChange(tf as Timeframe)}
-                className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition cursor-pointer ${
-                  timeframe === tf
-                    ? 'bg-amber-500 text-black font-bold'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                {tf}
-              </button>
-            ))}
+        {/* 24h High & Low */}
+        {ticker && ticker.highPrice !== '--' && (
+          <div className="hidden sm:flex items-center gap-3 text-[11px] font-mono text-slate-400">
+            <span>24h H: <strong className="text-slate-200">${formatPrice(ticker.highPrice)}</strong></span>
+            <span>24h L: <strong className="text-slate-200">${formatPrice(ticker.lowPrice)}</strong></span>
           </div>
+        )}
+      </div>
 
+      {/* ============================================================== */}
+      {/* 3. TIMEFRAME CONTROLS & CHART OPTIONS (Requirement 3 & 4)      */}
+      {/* ============================================================== */}
+      <div className="border-b border-[#181a24] bg-[#0c0d12] px-3 sm:px-3.5 py-1.5 flex flex-wrap items-center justify-between gap-1.5 text-xs shrink-0">
+        {/* Timeframe Quick Buttons */}
+        <div className="flex items-center bg-[#12131b] p-0.5 rounded border border-[#1e202d]">
+          {['1m', '5m', '15m', '1h', '4h', '1d'].map((tf) => (
+            <button
+              key={tf}
+              onClick={() => onTimeframeChange(tf as Timeframe)}
+              className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition cursor-pointer ${
+                timeframe === tf
+                  ? 'bg-amber-500 text-black font-bold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+
+        {/* Right Tools: Structure Toggle, Settings, Auto, Zoom, and Clear Full Screen Button */}
+        <div className="flex items-center gap-1.5 text-xs flex-wrap">
           {/* Market Structure Toggle */}
           <button
             onClick={() => {
@@ -1201,7 +1585,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                 ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 font-semibold'
                 : 'bg-[#12131b] text-slate-400 border-[#1e202d] hover:text-white'
             }`}
-            title="Toggle NWWT Market Structure (HH, HL, LH, LL, BOS, CHoCH)"
+            title="Toggle Market Structure"
           >
             <Layers className="w-3.5 h-3.5 text-amber-400" />
             <span className="hidden sm:inline">Structure</span>
@@ -1216,7 +1600,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                   ? 'bg-amber-500 text-black font-bold'
                   : 'bg-[#12131b] text-slate-300 border-[#1e202d] hover:text-white'
               }`}
-              title="Swing High / Swing Low Structure Settings"
+              title="Swing Structure Settings"
             >
               <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
               <span className="hidden sm:inline">Settings</span>
@@ -1306,7 +1690,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-slate-200 font-semibold">Swing Sensitivity</span>
                     <span className="text-amber-400 font-bold text-[11px]">
-                      {swingSensitivity === 1 ? 'Fast (1-bar)' : swingSensitivity === 2 ? 'Standard (2-bar)' : swingSensitivity === 3 ? 'Significant (3-bar)' : 'Macro (4-bar)'}
+                      {swingSensitivity === 1 ? 'Fast (1-bar)' : swingSensitivity === 2 ? 'Normal (2-bar)' : swingSensitivity === 3 ? 'Deep (3-bar)' : 'Macro (4-bar)'}
                     </span>
                   </div>
                   <div className="grid grid-cols-4 gap-1">
@@ -1328,7 +1712,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                     ))}
                   </div>
                   <div className="text-[10px] text-slate-500 mt-2 leading-relaxed">
-                    Adjusts fractal pivot lookback candles without altering core structural breakout logic.
+                    Prioritizes genuine structural extremes without flooding the chart with minor noise.
                   </div>
                 </div>
               </div>
@@ -1354,31 +1738,41 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
           <button
             onClick={() => handleZoom('in')}
-            className="p-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer"
+            className="p-1 rounded bg-[#12131b] hover:bg-[#1a1d28] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer"
             title="Zoom In"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => handleZoom('out')}
-            className="p-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer"
+            className="p-1 rounded bg-[#12131b] hover:bg-[#1a1d28] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer"
             title="Zoom Out"
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={handleResetView}
-            className="flex items-center gap-1 px-2 py-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer text-[11px] font-mono"
+            className="flex items-center gap-1 px-2 py-1 rounded bg-[#12131b] hover:bg-[#1a1d28] border border-[#1e202d] text-slate-300 hover:text-white transition cursor-pointer text-[11px] font-mono"
             title="Reset Chart View"
           >
             <RotateCcw className="w-3 h-3 text-amber-400" />
             <span className="hidden lg:inline">Reset</span>
           </button>
 
+          {/* Clear Full Screen Chart Button (Requirement 4) */}
+          <button
+            onClick={() => setIsFullScreen(true)}
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-400 hover:text-amber-300 transition cursor-pointer text-[11px] font-mono font-bold"
+            title="Open Full Screen Chart"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            <span>Full Screen</span>
+          </button>
+
           {onClose && (
             <button
               onClick={onClose}
-              className="p-1 rounded bg-[#12131b] hover:bg-[#1a1c27] border border-[#1e202d] text-slate-400 hover:text-red-400 transition cursor-pointer ml-1"
+              className="p-1 rounded bg-[#12131b] hover:bg-[#1a1d28] border border-[#1e202d] text-slate-400 hover:text-red-400 transition cursor-pointer ml-1"
               title="Close Chart"
             >
               <X className="w-4 h-4" />
@@ -1387,76 +1781,15 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
       </div>
 
-      {/* Active Signal V8 HUD Banner - ONLY shown for ACTIVE signals */}
-      {activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && (
-        <div className="px-3.5 py-1 bg-[#0d0f18] border-b border-[#1c1f2e] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1 font-bold text-amber-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-              NWWT Signal: {activeSignal.direction} ({activeSignal.setupType})
-            </span>
-            <span className="text-slate-400">
-              Entry: <strong className="text-white">{formatPrice(activeSignal.entryPrice)}</strong>
-            </span>
-            <span className="text-slate-400">
-              TP: <strong className="text-emerald-400">{formatPrice(activeSignal.takeProfit)}</strong>
-            </span>
-            <span className="text-slate-400">
-              SL: <strong className="text-red-400">{formatPrice(activeSignal.stopLoss)}</strong>
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-              WATCHING LIVE
-            </span>
-            <span className="text-[10px] text-slate-500">{activeSignal.confidence}% Conf.</span>
-          </div>
-        </div>
-      )}
-
-      {/* Real OHLC Bar */}
-      {latestCandle && (
-        <div className="px-3.5 py-1 bg-[#090a0e] border-b border-[#151722] flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono">
-          <div className="flex items-center gap-3">
-            <span>O: <span className="text-white font-medium">{formatPrice(latestCandle.open)}</span></span>
-            <span>H: <span className="text-emerald-400 font-medium">{formatPrice(latestCandle.high)}</span></span>
-            <span>L: <span className="text-red-400 font-medium">{formatPrice(latestCandle.low)}</span></span>
-            <span>
-              C: <span className={`font-semibold ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>{formatPrice(latestCandle.close)}</span>
-            </span>
-            <span className={`font-medium ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>
-              {isUp ? '+' : ''}{changePercent}%
-            </span>
-          </div>
-
-          {showMarketStructure && marketStructure.currentTrend !== 'neutral' && (
-            <span
-              className={`ml-auto px-1.5 py-0.2 rounded text-[10px] uppercase font-bold flex items-center gap-1 ${
-                marketStructure.currentTrend === 'bullish'
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : 'bg-red-500/20 text-red-400 border border-red-500/30'
-              }`}
-            >
-              {marketStructure.currentTrend === 'bullish' ? (
-                <TrendingUp className="w-3 h-3" />
-              ) : (
-                <TrendingDown className="w-3 h-3" />
-              )}
-              {marketStructure.currentTrend} Structure
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Main Interactive Canvas Area */}
-      <div className="flex-1 relative overflow-hidden w-full h-full min-h-[350px]">
+      {/* ============================================================== */}
+      {/* 4. COMPACT CHART (Requirement 3 & 4)                           */}
+      {/* ============================================================== */}
+      <div className="relative overflow-hidden w-full h-[270px] sm:h-[310px] lg:h-full lg:flex-1 min-h-[250px] shrink-0 lg:shrink">
         {isLoading && (
           <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
             <div className="flex flex-col items-center gap-2">
               <Activity className="w-6 h-6 text-amber-500 animate-spin" />
-              <span className="text-xs text-slate-300 font-mono">Loading Binance historical candles...</span>
+              <span className="text-xs text-slate-300 font-mono">Loading historical market data...</span>
             </div>
           </div>
         )}
@@ -1465,10 +1798,10 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           <div className="absolute inset-0 flex items-center justify-center p-4 bg-[#070709]/80 z-10 text-center">
             <div className="max-w-sm space-y-2 p-4 rounded-lg bg-[#0c0d12] border border-[#1e202d] shadow-xl">
               <div className="text-amber-400 text-sm font-semibold flex items-center justify-center gap-1.5">
-                Waiting for Binance Trades
+                Waiting for Market Trades
               </div>
               <div className="text-xs text-slate-400">
-                No historical klines recorded on Binance for <span className="font-mono text-slate-200">{symbol}</span> yet.
+                No historical market data recorded for <span className="font-mono text-slate-200">{symbol}</span> yet.
                 The live chart will start updating as trades arrive.
               </div>
             </div>
@@ -1503,41 +1836,85 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         />
       </div>
 
-      {/* Footer Navigation Tip */}
-      <div className="px-3 py-0.5 bg-[#181c27] border-t border-[#2a2e39] flex items-center justify-between text-[10px] text-slate-500 font-mono">
-        <div className="flex items-center gap-2">
-          <span>Pan: Drag chart</span>
-          <span>•</span>
-          <span>Zoom: Wheel / Pinch</span>
-          <span>•</span>
-          <span>Scale Price: Drag right axis</span>
-        </div>
-        <div>
-          <span>Candles: {candles.length}</span>
+      {/* ============================================================== */}
+      {/* 5. ADDITIONAL INFORMATION (Requirement 3 & 6)                   */}
+      {/* ============================================================== */}
+      <div className="border-t border-[#181a24] bg-[#090a0e] shrink-0">
+        {/* Real OHLC Bar */}
+        {latestCandle && (
+          <div className="px-3.5 py-1.5 border-b border-[#141620] flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11px] font-mono">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span>O: <span className="text-white font-medium">{formatPrice(latestCandle.open)}</span></span>
+              <span>H: <span className="text-emerald-400 font-medium">{formatPrice(latestCandle.high)}</span></span>
+              <span>L: <span className="text-red-400 font-medium">{formatPrice(latestCandle.low)}</span></span>
+              <span>
+                C: <span className={`font-semibold ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>{formatPrice(latestCandle.close)}</span>
+              </span>
+              <span className={`font-medium ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>
+                {isUp ? '+' : ''}{changePercent}%
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 text-[10px] text-slate-500">
+              <span>Candles: {candles.length}</span>
+              <span>•</span>
+              <span>Pan: Drag</span>
+              <span>•</span>
+              <span>Zoom: Wheel / Pinch</span>
+            </div>
+          </div>
+        )}
+
+        {/* Candlestick Formations (Progressive Disclosure - Requirement 6) */}
+        {scanResult.patterns.length > 0 && (
+          <div className="p-3 border-b border-[#141620]">
+            <div
+              onClick={() => setIsPatternsOpen((prev) => !prev)}
+              className="flex items-center justify-between cursor-pointer text-xs font-semibold text-slate-300 hover:text-white"
+            >
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>Detected Candlestick Formations ({scanResult.patterns.length})</span>
+              </div>
+              {isPatternsOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+            </div>
+
+            {isPatternsOpen && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2 pt-2 border-t border-[#151722]">
+                {scanResult.patterns.map((p) => {
+                  const isBull = p.bias === 'bullish';
+                  return (
+                    <div
+                      key={p.id}
+                      className="p-2 rounded bg-[#0b0c12] border border-[#1a1d2a] text-xs font-mono"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`font-bold ${isBull ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {p.name}
+                        </span>
+                        <span className="text-[10px] text-slate-500">{p.confidence}% Score</span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1 leading-snug">
+                        {p.description}
+                      </p>
+                      <div className="mt-1 pt-1 border-t border-[#141622] flex items-center justify-between text-[10px] text-slate-500">
+                        <span>Level: ${formatPrice(p.priceLevel)}</span>
+                        <span>Invalidation: ${formatPrice(p.invalidationPrice)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Educational Market Disclaimer */}
+        <div className="px-3.5 py-2 text-[10px] text-slate-500 font-mono flex items-center justify-between">
+          <span>Educational market analysis terminal. Not financial advice.</span>
+          <span>NWWT Confluence</span>
         </div>
       </div>
-
-      {/* Modular AI Chart Scanner Foundation */}
-      <ChartScanner
-        asset={symbol}
-        symbol={symbol}
-        timeframe={timeframe}
-        candles={candles}
-        volume={{
-          latestCandleVolume: candles.length > 0 ? candles[candles.length - 1].volume : 0,
-          total24hVolume: ticker?.volume || '0',
-          quoteVolume: ticker?.quoteVolume
-        }}
-        marketStructure={marketStructure}
-        currentPrice={
-          candles.length > 0
-            ? candles[candles.length - 1].close
-            : ticker?.lastPrice && ticker.lastPrice !== '--'
-            ? parseFloat(ticker.lastPrice)
-            : 0
-        }
-        ticker={ticker}
-      />
     </div>
   );
 };

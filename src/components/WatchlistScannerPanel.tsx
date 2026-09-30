@@ -165,7 +165,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
               </div>
             </div>
             <div className="text-[10px] text-slate-500 font-mono">
-              {scannedCount} pairs • Closed candles • Live performance tracking
+              {scannedCount} pairs analyzed • Real-time structure scanning
             </div>
           </div>
         </div>
@@ -269,8 +269,8 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
         </button>
       </div>
 
-      {/* Main Content Area - fully scrollable on mobile without getting trapped behind bottom nav */}
-      <div className="flex-1 overflow-y-auto divide-y divide-[#161720] pb-24 lg:pb-8 overscroll-contain">
+      {/* Main Content Area - naturally scrollable without oversized empty box */}
+      <div className="flex-1 overflow-y-auto pb-24 lg:pb-6 overscroll-contain">
         {activeSubTab === 'signals' ? (
           <>
             {/* Signals Filter Pill Bar */}
@@ -593,7 +593,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                   Overall Take Profit (TP) Rate
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
-                  V8 Live Tracker
+                  Live Verified
                 </span>
               </div>
 
@@ -832,12 +832,12 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
             )}
           </div>
         )}
-      </div>
 
-      {/* Bottom Educational Disclaimer - lifted above mobile bottom nav */}
-      <div className="p-2 border-t border-[#181920] bg-[#0a0a0d] text-[10px] text-slate-500 flex items-center justify-between font-mono shrink-0 mb-14 lg:mb-0">
-        <span>V8 Signal Performance Engine</span>
-        <span>Educational only • Not trading advice</span>
+        {/* Clean Natural Footer - sits directly at the end of content without oversized empty container */}
+        <div className="mt-4 px-3 py-3 border-t border-[#181920] bg-[#08090d] text-[10px] text-slate-500 flex items-center justify-between font-mono">
+          <span>NWWT Structure Analysis</span>
+          <span>Educational Market Data Only</span>
+        </div>
       </div>
     </div>
   );

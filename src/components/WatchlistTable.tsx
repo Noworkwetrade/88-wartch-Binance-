@@ -119,7 +119,7 @@ export const WatchlistTable: React.FC<WatchlistTableProps> = ({
             {visibleTickers.length === 0 ? (
               <tr>
                 <td colSpan={4} className="py-16 text-center text-slate-500 font-mono">
-                  No matching Binance Spot USDT pairs found.
+                  No matching assets found.
                 </td>
               </tr>
             ) : (
