@@ -184,13 +184,12 @@ export default function App() {
     };
   }, [selectedSymbolName, tickersList, tickersMap]);
 
-  // Active signal for currently selected asset
+  // Active signal for currently selected asset - ONLY ACTIVE setups get drawn on chart
+  // Completed trades (WIN / LOSS / EXPIRED) must never leave levels behind on active chart
   const activeSignalForAsset = useMemo(() => {
     if (!selectedSymbolName) return null;
     return (
-      performanceSignals.find((s) => s.asset === selectedSymbolName && s.status === 'ACTIVE') ||
-      performanceSignals.find((s) => s.asset === selectedSymbolName) ||
-      null
+      performanceSignals.find((s) => s.asset === selectedSymbolName && s.status === 'ACTIVE') || null
     );
   }, [performanceSignals, selectedSymbolName]);
 
@@ -361,24 +360,24 @@ export default function App() {
         )}
 
         {/* Sticky Bottom Navigation Bar for Mobile */}
-        <div className="fixed bottom-0 left-0 right-0 h-14 bg-[#0a0a0e] border-t border-[#181a24] z-40 flex items-center justify-around px-2 select-none shadow-lg">
+        <div className="fixed bottom-0 left-0 right-0 h-14 bg-[#0a0a0e]/95 backdrop-blur-md border-t border-[#181a24] z-40 flex items-center justify-around px-2 select-none shadow-lg pb-safe">
           <button
             onClick={() => setActiveTab('watchlist')}
-            className={`flex flex-col items-center justify-center flex-1 h-full py-1 transition ${
+            className={`flex flex-col items-center justify-center flex-1 h-full py-1 transition cursor-pointer min-w-0 ${
               activeTab === 'watchlist' ? 'text-amber-400 font-bold' : 'text-slate-400 hover:text-white'
             }`}
           >
-            <BarChart2 className="w-4 h-4 mb-0.5" />
-            <span className="text-[10px] font-mono">Watchlist</span>
+            <BarChart2 className="w-4 h-4 mb-0.5 shrink-0" />
+            <span className="text-[10px] font-mono truncate">Watchlist</span>
           </button>
 
           <button
             onClick={() => setActiveTab('chart')}
-            className={`flex flex-col items-center justify-center flex-1 h-full py-1 transition ${
+            className={`flex flex-col items-center justify-center flex-1 h-full py-1 transition cursor-pointer min-w-0 ${
               activeTab === 'chart' ? 'text-amber-400 font-bold' : 'text-slate-400 hover:text-white'
             }`}
           >
-            <TrendingUp className="w-4 h-4 mb-0.5" />
+            <TrendingUp className="w-4 h-4 mb-0.5 shrink-0" />
             <span className="text-[10px] font-mono truncate max-w-[90px]">
               {selectedSymbolName ? selectedSymbolName.replace(/USDT$/, '') : 'Chart'}
             </span>
@@ -386,17 +385,17 @@ export default function App() {
 
           <button
             onClick={() => setActiveTab('scanner')}
-            className={`flex flex-col items-center justify-center flex-1 h-full py-1 transition relative ${
+            className={`flex flex-col items-center justify-center flex-1 h-full py-1 transition cursor-pointer min-w-0 relative ${
               activeTab === 'scanner' ? 'text-amber-400 font-bold' : 'text-slate-400 hover:text-white'
             }`}
           >
             <div className="relative">
-              <Zap className="w-4 h-4 mb-0.5 text-amber-400" />
+              <Zap className="w-4 h-4 mb-0.5 text-amber-400 shrink-0" />
               {scannerState.signals.length > 0 && (
                 <span className="absolute -top-1 -right-2.5 w-2 h-2 rounded-full bg-emerald-400" />
               )}
             </div>
-            <span className="text-[10px] font-mono">Scanner</span>
+            <span className="text-[10px] font-mono truncate">Scanner</span>
           </button>
         </div>
       </div>

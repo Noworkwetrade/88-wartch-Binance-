@@ -109,6 +109,23 @@ app.get('/api/scanner/performance', (req, res) => {
   res.json(scannerService.computePerformanceStats());
 });
 
+app.post('/api/scanner/scan-asset', async (req, res) => {
+  try {
+    const { symbol, timeframe } = req.body || {};
+    if (!symbol) {
+      return res.status(400).json({ error: 'Symbol parameter is required' });
+    }
+    const result = await scannerService.scanSingleAsset(symbol, timeframe || '15m');
+    res.json({
+      success: true,
+      result,
+      scanner: scannerService.getScanData()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/reconnect', async (req, res) => {
   try {
     binanceSocket.connect();

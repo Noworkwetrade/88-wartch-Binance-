@@ -25,6 +25,7 @@ import {
   ZoomOut,
   ChevronDown,
   Layers,
+  SlidersHorizontal,
   TrendingUp,
   TrendingDown,
   Activity,
@@ -134,6 +135,39 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const [showMarketStructure, setShowMarketStructure] = useState<boolean>(() => {
     return localStorage.getItem('weex_show_market_structure') !== 'false';
   });
+
+  // Swing High / Swing Low Sensitivity (pivot lookback candles: 1 to 4)
+  const [swingSensitivity, setSwingSensitivity] = useState<number>(() => {
+    const saved = localStorage.getItem('nwwt_swing_sensitivity');
+    return saved ? parseInt(saved, 10) || 2 : 2;
+  });
+
+  // Structure Markers Toggle (HH, HL, LH, LL pivot tags)
+  const [showStructureMarkers, setShowStructureMarkers] = useState<boolean>(() => {
+    return localStorage.getItem('nwwt_show_structure_markers') !== 'false';
+  });
+
+  // Structure Breaks Toggle (BOS and CHoCH horizontal lines)
+  const [showStructureBreaks, setShowStructureBreaks] = useState<boolean>(() => {
+    return localStorage.getItem('nwwt_show_structure_breaks') !== 'false';
+  });
+
+  // Structure Settings Popover control
+  const [isStructureSettingsOpen, setIsStructureSettingsOpen] = useState<boolean>(false);
+  const structureSettingsRef = useRef<HTMLDivElement | null>(null);
+
+  // Close structure settings on outside click
+  useEffect(() => {
+    const handleSettingsClickOutside = (e: MouseEvent) => {
+      if (structureSettingsRef.current && !structureSettingsRef.current.contains(e.target as Node)) {
+        setIsStructureSettingsOpen(false);
+      }
+    };
+    if (isStructureSettingsOpen) {
+      document.addEventListener('mousedown', handleSettingsClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleSettingsClickOutside);
+  }, [isStructureSettingsOpen]);
 
   // Crosshair state
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
@@ -332,10 +366,10 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     });
   }, [ticker, timeframe]);
 
-  // Calculate Market Structure from actual candle data
+  // Calculate Market Structure from actual candle data with adjustable swing sensitivity
   const marketStructure: MarketStructureResult = useMemo(() => {
-    return calculateMarketStructure(candles, 2);
-  }, [candles]);
+    return calculateMarketStructure(candles, swingSensitivity);
+  }, [candles, swingSensitivity]);
 
   // Reset View to latest price & auto-scale
   const handleResetView = useCallback(() => {
@@ -771,86 +805,91 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       const coordMap = new Map<number, number>();
       candleCoordinates.forEach((item) => coordMap.set(item.index, item.x));
 
-      // Draw Structural Breaks (BOS / CHoCH horizontal lines)
-      marketStructure.structureBreaks.forEach((sb) => {
-        const originX = coordMap.get(sb.originIndex);
-        const breakX = coordMap.get(sb.breakIndex);
+      // Draw Structural Breaks (BOS / CHoCH horizontal lines) if enabled
+      if (showStructureBreaks) {
+        marketStructure.structureBreaks.forEach((sb) => {
+          const originX = coordMap.get(sb.originIndex);
+          const breakX = coordMap.get(sb.breakIndex);
 
-        if (originX !== undefined || breakX !== undefined) {
-          const startX = originX !== undefined ? originX : 0;
-          const endX = breakX !== undefined ? breakX : chartWidth;
-          const y = priceToY(sb.originPrice);
+          if (originX !== undefined || breakX !== undefined) {
+            const startX = originX !== undefined ? originX : 0;
+            const endX = breakX !== undefined ? breakX : chartWidth;
+            const y = priceToY(sb.originPrice);
 
-          if (y >= 0 && y <= chartHeight) {
-            const isBull = sb.direction === 'bullish';
-            const lineColor = sb.type === 'CHoCH'
-              ? '#38bdf8' // Cyan for CHoCH
-              : isBull ? '#34d399' : '#f87171'; // Green / Red for BOS
+            if (y >= 0 && y <= chartHeight) {
+              const isBull = sb.direction === 'bullish';
+              const lineColor = sb.type === 'CHoCH'
+                ? '#38bdf8' // Cyan for CHoCH
+                : isBull ? '#34d399' : '#f87171'; // Green / Red for BOS
 
-            ctx.save();
-            ctx.setLineDash([4, 4]);
-            ctx.strokeStyle = lineColor;
-            ctx.lineWidth = 1.2;
-            ctx.beginPath();
-            ctx.moveTo(Math.max(0, startX), y);
-            ctx.lineTo(Math.min(chartWidth, endX), y);
-            ctx.stroke();
-            ctx.restore();
+              ctx.save();
+              ctx.setLineDash([4, 4]);
+              ctx.strokeStyle = lineColor;
+              ctx.lineWidth = 1.2;
+              ctx.beginPath();
+              ctx.moveTo(Math.max(0, startX), y);
+              ctx.lineTo(Math.min(chartWidth, endX), y);
+              ctx.stroke();
+              ctx.restore();
 
-            // Label badge
-            const midX = (Math.max(0, startX) + Math.min(chartWidth, endX)) / 2;
-            const label = `${sb.type}`;
-            ctx.font = 'bold 9px sans-serif';
-            const textWidth = ctx.measureText(label).width;
+              // Label badge
+              const midX = (Math.max(0, startX) + Math.min(chartWidth, endX)) / 2;
+              const label = `${sb.type}`;
+              ctx.font = 'bold 9px sans-serif';
+              const textWidth = ctx.measureText(label).width;
 
-            ctx.fillStyle = '#1e222d';
-            ctx.fillRect(midX - textWidth / 2 - 4, y - 7, textWidth + 8, 14);
-            ctx.strokeStyle = lineColor;
-            ctx.lineWidth = 1;
-            ctx.strokeRect(midX - textWidth / 2 - 4, y - 7, textWidth + 8, 14);
+              ctx.fillStyle = '#1e222d';
+              ctx.fillRect(midX - textWidth / 2 - 4, y - 7, textWidth + 8, 14);
+              ctx.strokeStyle = lineColor;
+              ctx.lineWidth = 1;
+              ctx.strokeRect(midX - textWidth / 2 - 4, y - 7, textWidth + 8, 14);
 
-            ctx.fillStyle = lineColor;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(label, midX, y);
+              ctx.fillStyle = lineColor;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(label, midX, y);
+            }
           }
-        }
-      });
+        });
+      }
 
-      // Draw Swing Points (HH, HL, LH, LL)
-      marketStructure.swingPoints.forEach((sp) => {
-        const x = coordMap.get(sp.index);
-        if (x !== undefined && x >= 0 && x <= chartWidth) {
-          const y = priceToY(sp.price);
-          if (y >= 0 && y <= chartHeight) {
-            const isHigh = sp.isHigh;
-            const labelY = isHigh ? y - 10 : y + 12;
+      // Draw Swing Points (HH, HL, LH, LL markers) if enabled
+      if (showStructureMarkers) {
+        marketStructure.swingPoints.forEach((sp) => {
+          const x = coordMap.get(sp.index);
+          if (x !== undefined && x >= 0 && x <= chartWidth) {
+            const y = priceToY(sp.price);
+            if (y >= 0 && y <= chartHeight) {
+              const isHigh = sp.isHigh;
+              const labelY = isHigh ? y - 10 : y + 12;
 
-            const isBullishType = sp.type === 'HH' || sp.type === 'HL';
-            const badgeBg = isBullishType ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.25)';
-            const badgeBorder = isBullishType ? '#10b981' : '#ef4444';
-            const badgeText = isBullishType ? '#34d399' : '#f87171';
+              const isBullishType = sp.type === 'HH' || sp.type === 'HL';
+              const badgeBg = isBullishType ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.25)';
+              const badgeBorder = isBullishType ? '#10b981' : '#ef4444';
+              const badgeText = isBullishType ? '#34d399' : '#f87171';
 
-            ctx.font = 'bold 8.5px monospace';
-            const textWidth = ctx.measureText(sp.type).width;
+              ctx.font = 'bold 8.5px monospace';
+              const textWidth = ctx.measureText(sp.type).width;
 
-            ctx.fillStyle = badgeBg;
-            ctx.fillRect(x - textWidth / 2 - 3, labelY - 6, textWidth + 6, 12);
-            ctx.strokeStyle = badgeBorder;
-            ctx.lineWidth = 0.8;
-            ctx.strokeRect(x - textWidth / 2 - 3, labelY - 6, textWidth + 6, 12);
+              ctx.fillStyle = badgeBg;
+              ctx.fillRect(x - textWidth / 2 - 3, labelY - 6, textWidth + 6, 12);
+              ctx.strokeStyle = badgeBorder;
+              ctx.lineWidth = 0.8;
+              ctx.strokeRect(x - textWidth / 2 - 3, labelY - 6, textWidth + 6, 12);
 
-            ctx.fillStyle = badgeText;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(sp.type, x, labelY);
+              ctx.fillStyle = badgeText;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(sp.type, x, labelY);
+            }
           }
-        }
-      });
+        });
+      }
     }
 
-    // 3.5 Draw Active Signal Entry, Take Profit, and Stop Loss Levels
-    if (activeSignal && activeSignal.entryPrice) {
+    // 3.5 Draw Active Signal Entry, Take Profit, and Stop Loss Levels (ONLY for ACTIVE setups)
+    // When TP or SL is hit, signal completes and trade levels are removed from the active chart
+    if (activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice) {
       const drawSignalLevel = (price: number, label: string, color: string, badgeBg: string) => {
         const y = priceToY(price);
         if (y >= 0 && y <= chartHeight) {
@@ -1152,7 +1191,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
           {/* Market Structure Toggle */}
           <button
-            onClick={() => setShowMarketStructure((prev) => !prev)}
+            onClick={() => {
+              const next = !showMarketStructure;
+              setShowMarketStructure(next);
+              localStorage.setItem('weex_show_market_structure', String(next));
+            }}
             className={`flex items-center gap-1 px-2 py-1 rounded border text-xs font-mono transition-colors cursor-pointer ${
               showMarketStructure
                 ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 font-semibold'
@@ -1163,6 +1206,134 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             <Layers className="w-3.5 h-3.5 text-amber-400" />
             <span className="hidden sm:inline">Structure</span>
           </button>
+
+          {/* Visible Structure Settings Button & Popover */}
+          <div className="relative" ref={structureSettingsRef}>
+            <button
+              onClick={() => setIsStructureSettingsOpen((prev) => !prev)}
+              className={`flex items-center gap-1 px-2 py-1 rounded border text-xs font-mono transition-colors cursor-pointer ${
+                isStructureSettingsOpen
+                  ? 'bg-amber-500 text-black font-bold'
+                  : 'bg-[#12131b] text-slate-300 border-[#1e202d] hover:text-white'
+              }`}
+              title="Swing High / Swing Low Structure Settings"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Settings</span>
+            </button>
+
+            {/* Structure Settings Popover Dropdown */}
+            {isStructureSettingsOpen && (
+              <div className="absolute right-0 top-full mt-1.5 w-72 max-w-[calc(100vw-32px)] bg-[#0e1017] border border-[#26293a] rounded-lg shadow-2xl p-3 z-50 text-xs font-mono select-none">
+                <div className="flex items-center justify-between pb-2 mb-2.5 border-b border-[#1c1f2e]">
+                  <span className="font-bold text-white uppercase text-[11px] tracking-wider flex items-center gap-1.5">
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+                    Structure Settings
+                  </span>
+                  <button
+                    onClick={() => setIsStructureSettingsOpen(false)}
+                    className="text-slate-400 hover:text-white p-0.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Master Structure Toggle */}
+                <div className="flex items-center justify-between py-1.5 mb-2">
+                  <span className="text-slate-300">Market Structure</span>
+                  <button
+                    onClick={() => {
+                      const next = !showMarketStructure;
+                      setShowMarketStructure(next);
+                      localStorage.setItem('weex_show_market_structure', String(next));
+                    }}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition cursor-pointer ${
+                      showMarketStructure
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                        : 'bg-[#181a24] text-slate-500 border border-[#222533]'
+                    }`}
+                  >
+                    {showMarketStructure ? 'ENABLED' : 'DISABLED'}
+                  </button>
+                </div>
+
+                {/* Structure Markers Toggle (HH, HL, LH, LL) */}
+                <div className="flex items-center justify-between py-1.5 mb-2">
+                  <div>
+                    <div className="text-slate-200">Swing Markers</div>
+                    <div className="text-[10px] text-slate-500">HH, HL, LH, LL labels</div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !showStructureMarkers;
+                      setShowStructureMarkers(next);
+                      localStorage.setItem('nwwt_show_structure_markers', String(next));
+                    }}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition cursor-pointer ${
+                      showStructureMarkers
+                        ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                        : 'bg-[#181a24] text-slate-500 border border-[#222533]'
+                    }`}
+                  >
+                    {showStructureMarkers ? 'SHOW' : 'HIDE'}
+                  </button>
+                </div>
+
+                {/* Structure Breaks Toggle (BOS, CHoCH) */}
+                <div className="flex items-center justify-between py-1.5 mb-2.5">
+                  <div>
+                    <div className="text-slate-200">Structure Breaks</div>
+                    <div className="text-[10px] text-slate-500">BOS & CHoCH lines</div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !showStructureBreaks;
+                      setShowStructureBreaks(next);
+                      localStorage.setItem('nwwt_show_structure_breaks', String(next));
+                    }}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition cursor-pointer ${
+                      showStructureBreaks
+                        ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                        : 'bg-[#181a24] text-slate-500 border border-[#222533]'
+                    }`}
+                  >
+                    {showStructureBreaks ? 'SHOW' : 'HIDE'}
+                  </button>
+                </div>
+
+                {/* Swing Sensitivity (Pivot Lookback) */}
+                <div className="pt-2 border-t border-[#1c1f2e]">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-slate-200 font-semibold">Swing Sensitivity</span>
+                    <span className="text-amber-400 font-bold text-[11px]">
+                      {swingSensitivity === 1 ? 'Fast (1-bar)' : swingSensitivity === 2 ? 'Standard (2-bar)' : swingSensitivity === 3 ? 'Significant (3-bar)' : 'Macro (4-bar)'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {[1, 2, 3, 4].map((val) => (
+                      <button
+                        key={val}
+                        onClick={() => {
+                          setSwingSensitivity(val);
+                          localStorage.setItem('nwwt_swing_sensitivity', String(val));
+                        }}
+                        className={`py-1 rounded text-center text-[10px] font-bold transition cursor-pointer ${
+                          swingSensitivity === val
+                            ? 'bg-amber-500 text-black'
+                            : 'bg-[#141622] text-slate-400 hover:text-white border border-[#202334]'
+                        }`}
+                      >
+                        {val === 1 ? 'Fast' : val === 2 ? 'Normal' : val === 3 ? 'Deep' : 'Macro'}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-2 leading-relaxed">
+                    Adjusts fractal pivot lookback candles without altering core structural breakout logic.
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Auto Scale Reset */}
           <button
@@ -1216,8 +1387,8 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
       </div>
 
-      {/* Active Signal V8 HUD Banner */}
-      {activeSignal && activeSignal.entryPrice && (
+      {/* Active Signal V8 HUD Banner - ONLY shown for ACTIVE signals */}
+      {activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && (
         <div className="px-3.5 py-1 bg-[#0d0f18] border-b border-[#1c1f2e] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1 font-bold text-amber-400">
@@ -1236,17 +1407,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            <span
-              className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
-                activeSignal.status === 'WIN'
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : activeSignal.status === 'LOSS'
-                  ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-              }`}
-            >
-              {activeSignal.status === 'ACTIVE' ? 'WATCHING LIVE' : activeSignal.status}
-              {activeSignal.pnlPercent ? ` (${activeSignal.pnlPercent > 0 ? '+' : ''}${activeSignal.pnlPercent.toFixed(1)}%)` : ''}
+            <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              WATCHING LIVE
             </span>
             <span className="text-[10px] text-slate-500">{activeSignal.confidence}% Conf.</span>
           </div>

@@ -31,7 +31,9 @@ import {
   XCircle,
   Percent,
   Compass,
-  Trash2
+  Trash2,
+  Search,
+  X
 } from 'lucide-react';
 import { ScannerState, Timeframe, ScannerSignalItem, PendingRetestItem, SignalPerformanceStats } from '../types.ts';
 import { formatPrice } from './WatchlistTable.tsx';
@@ -68,6 +70,47 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   const [signalFilter, setSignalFilter] = useState<'all' | 'active' | 'completed'>('all');
   // Performance outcome filter
   const [historyFilter, setHistoryFilter] = useState<'all' | 'wins' | 'losses'>('all');
+
+  // Scan Market (Single asset on active chart) state
+  const [isScanningSpecificAsset, setIsScanningSpecificAsset] = useState<boolean>(false);
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
+
+  /**
+   * Scans the specific asset currently selected on the chart using live market data.
+   * Does NOT scan a random asset. Does NOT switch the selected asset.
+   */
+  const handleScanMarket = async () => {
+    const target = selectedAsset || 'BTCUSDT';
+    setIsScanningSpecificAsset(true);
+    setScanMessage(`Scanning ${target} (${timeframe}) with live market candles...`);
+
+    try {
+      const res = await fetch('/api/scanner/scan-asset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: target, timeframe })
+      });
+      const data = await res.json();
+      if (data && data.result) {
+        if (data.result.signal) {
+          setScanMessage(`Setup Identified on ${target}: ${data.result.signal.direction} (${data.result.signal.setupType})`);
+        } else if (data.result.pendingRetest) {
+          setScanMessage(`Retest Detected on ${target}: Pulling back to $${formatPrice(data.result.pendingRetest.targetLevel)}`);
+        } else {
+          setScanMessage(`Scan Complete on ${target} (${timeframe}): No confirmed setup. Waiting for break or retest.`);
+        }
+      } else {
+        setScanMessage(`Scan finished for ${target}.`);
+      }
+    } catch (err: any) {
+      setScanMessage(`Scan error on ${target}: ${err.message || 'Check connection'}`);
+    } finally {
+      setIsScanningSpecificAsset(false);
+      setTimeout(() => {
+        setScanMessage(null);
+      }, 7500);
+    }
+  };
 
   // Filter signals list based on selected filter
   const filteredSignals = useMemo(() => {
@@ -127,8 +170,22 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
           </div>
         </div>
 
-        {/* Timeframe Selector & Manual Scan Button */}
-        <div className="flex items-center gap-2">
+        {/* Timeframe Selector, Clear Scan Market Button, & Full Watchlist Refresh */}
+        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+          {/* Clear Scan Market Button - strictly scans currently selected chart asset without switching */}
+          <button
+            onClick={handleScanMarket}
+            disabled={isScanningSpecificAsset || isScanning}
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 active:scale-95 text-black font-mono font-bold text-[11px] shadow-sm transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            title={`Scan technical structure & setups for currently selected chart asset (${selectedAsset || 'BTCUSDT'})`}
+          >
+            <Search className={`w-3 h-3 ${isScanningSpecificAsset ? 'animate-spin' : ''}`} />
+            <span>Scan Market</span>
+            <span className="text-[9.5px] bg-black/25 text-black px-1 rounded font-bold">
+              {selectedAsset ? selectedAsset.replace(/USDT$/, '') : 'BTC'}
+            </span>
+          </button>
+
           <div className="flex items-center bg-[#12131a] p-0.5 rounded border border-[#20222d]">
             {SCANNER_TIMEFRAMES.map((tf) => (
               <button
@@ -154,12 +211,28 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
             className={`p-1.5 rounded bg-[#161822] hover:bg-[#202330] border border-[#2a2e3d] text-amber-400 transition cursor-pointer ${
               isScanning ? 'opacity-50 cursor-not-allowed' : 'active:scale-95'
             }`}
-            title="Scan watchlist candles now"
+            title="Scan all watchlist pairs"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
+
+      {/* Scan Market Result Notification Banner */}
+      {scanMessage && (
+        <div className="px-3 py-1.5 bg-[#141724] border-b border-amber-500/30 text-amber-300 text-[11px] font-mono flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 overflow-hidden">
+            <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="truncate">{scanMessage}</span>
+          </div>
+          <button
+            onClick={() => setScanMessage(null)}
+            className="text-slate-400 hover:text-white shrink-0 p-0.5"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
 
       {/* Sub-Tabs: Signals vs Performance */}
       <div className="flex items-center border-b border-[#181a24] bg-[#090a0f] p-1 shrink-0">
@@ -196,8 +269,8 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
         </button>
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto divide-y divide-[#161720]">
+      {/* Main Content Area - fully scrollable on mobile without getting trapped behind bottom nav */}
+      <div className="flex-1 overflow-y-auto divide-y divide-[#161720] pb-24 lg:pb-8 overscroll-contain">
         {activeSubTab === 'signals' ? (
           <>
             {/* Signals Filter Pill Bar */}
@@ -693,7 +766,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                   No completed results match the filter. Active signals are being watched live.
                 </div>
               ) : (
-                <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                <div className="space-y-1.5 max-h-96 lg:max-h-80 overflow-y-auto pr-1 overscroll-contain">
                   {filteredCompleted.map((item) => {
                     const isWin = item.status === 'WIN';
                     const isLoss = item.status === 'LOSS';
@@ -761,8 +834,8 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
         )}
       </div>
 
-      {/* Bottom Educational Disclaimer */}
-      <div className="p-2 border-t border-[#181920] bg-[#0a0a0d] text-[10px] text-slate-500 flex items-center justify-between font-mono shrink-0">
+      {/* Bottom Educational Disclaimer - lifted above mobile bottom nav */}
+      <div className="p-2 border-t border-[#181920] bg-[#0a0a0d] text-[10px] text-slate-500 flex items-center justify-between font-mono shrink-0 mb-14 lg:mb-0">
         <span>V8 Signal Performance Engine</span>
         <span>Educational only • Not trading advice</span>
       </div>

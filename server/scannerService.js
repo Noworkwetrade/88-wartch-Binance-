@@ -324,6 +324,62 @@ class ScannerService {
     }
   }
 
+  /**
+   * Scans specifically the asset selected on the active chart.
+   * Does NOT scan a random asset.
+   * Does NOT switch the selected asset.
+   * Uses real closed candles and live market data.
+   */
+  async scanSingleAsset(symbol, timeframe = '15m') {
+    if (!symbol) return null;
+    try {
+      const rawCandles = await fetchKlines(symbol, timeframe, 60);
+      if (!rawCandles || rawCandles.length < 15) {
+        return {
+          asset: symbol,
+          timeframe,
+          signal: null,
+          pendingRetest: null,
+          message: 'Insufficient historical candle data.'
+        };
+      }
+
+      const closedCandles = rawCandles.slice(0, rawCandles.length - 1);
+      const currentPrice = rawCandles[rawCandles.length - 1].close;
+
+      const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
+      if (analysis.signal) {
+        this.performanceSignals.set(analysis.signal.id, analysis.signal);
+        this.syncActiveSignalsArray();
+        this.watchActiveSignals();
+      }
+      if (analysis.pendingRetest) {
+        this.pendingRetests = [
+          analysis.pendingRetest,
+          ...this.pendingRetests.filter((p) => p.asset !== symbol)
+        ];
+      }
+
+      return {
+        asset: symbol,
+        timeframe,
+        currentPrice,
+        signal: analysis.signal,
+        pendingRetest: analysis.pendingRetest,
+        scannedAt: Date.now()
+      };
+    } catch (err) {
+      console.warn(`[scannerService] Error scanning single asset ${symbol}:`, err.message);
+      return {
+        asset: symbol,
+        timeframe,
+        signal: null,
+        pendingRetest: null,
+        error: err.message
+      };
+    }
+  }
+
   analyzeCandles(symbol, timeframe, closedCandles, currentPrice) {
     const len = closedCandles.length;
     if (len < 10) return { signal: null, pendingRetest: null };
