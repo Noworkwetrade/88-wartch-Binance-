@@ -44,6 +44,23 @@ import { calculateMarketStructure, getTimeframeDurationMs } from '../utils/marke
 import { formatPrice } from './WatchlistTable.tsx';
 import { runChartScan } from './scanner/scannerEngine.ts';
 import { ScannerAnalysisResult } from './scanner/types.ts';
+import { useChartDrawings } from '../hooks/useChartDrawings.ts';
+import { useDrawingAlerts } from '../hooks/useDrawingAlerts.ts';
+import {
+  drawChartElement,
+  CoordinateContext,
+  timeToX,
+  xToTime,
+  priceToY as convertPriceToY,
+  yToPrice as convertYToPrice,
+  hitTestDrawing
+} from '../utils/drawingGeometry.ts';
+import { DrawingToolbar } from './drawing/DrawingToolbar.tsx';
+import { DrawingPropertiesBar } from './drawing/DrawingPropertiesBar.tsx';
+import { DrawingAlertModal } from './drawing/DrawingAlertModal.tsx';
+import { DrawingManagerModal } from './drawing/DrawingManagerModal.tsx';
+import { AlertNotificationToast } from './drawing/AlertNotificationToast.tsx';
+import { ChartDrawing, ChartPoint } from '../types/drawings.ts';
 
 interface CandlestickChartProps {
   symbol: string;
@@ -126,6 +143,55 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const [candles, setCandles] = useState<Candle[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // Drawing Tools Hook
+  const {
+    drawings,
+    setDrawings,
+    activeTool,
+    setActiveTool,
+    selectedDrawingId,
+    selectDrawing,
+    pendingPoints,
+    setPendingPoints,
+    updateDrawing,
+    deleteDrawing,
+    duplicateDrawing,
+    toggleLock,
+    toggleVisibility,
+    renameDrawing,
+    clearAllDrawings,
+    completeNewDrawing,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    addAlertToDrawing,
+    removeAlertFromDrawing,
+    toggleAlertStatus
+  } = useChartDrawings(symbol);
+
+  // Modals state
+  const [isAlertModalOpen, setIsAlertModalOpen] = useState<boolean>(false);
+  const [isManagerModalOpen, setIsManagerModalOpen] = useState<boolean>(false);
+  const [areAllDrawingsVisible, setAreAllDrawingsVisible] = useState<boolean>(true);
+
+  // Drawing Drag / Move state
+  const drawingDragModeRef = useRef<'none' | 'drawing' | 'handle'>('none');
+  const activeHandleIndexRef = useRef<number | null>(null);
+  const drawingDragStartPointRef = useRef<ChartPoint | null>(null);
+  const drawingSnapshotRef = useRef<ChartDrawing | null>(null);
+  const coordCtxRef = useRef<CoordinateContext | null>(null);
+
+  const selectedDrawing = useMemo(() => {
+    return drawings.find((d) => d.id === selectedDrawingId) || null;
+  }, [drawings, selectedDrawingId]);
+
+  const toggleAllVisibility = useCallback(() => {
+    const next = !areAllDrawingsVisible;
+    setAreAllDrawingsVisible(next);
+    setDrawings(drawings.map((d) => ({ ...d, visible: next })));
+  }, [areAllDrawingsVisible, drawings, setDrawings]);
 
   // --- TradingView Interactive Transformation State ---
   // Horizontal zoom (pixels per candle)
@@ -429,6 +495,52 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     return 0;
   }, [candles, ticker]);
 
+  // Drawing Alerts Hook
+  const {
+    notifications,
+    notificationHistory,
+    dismissNotification,
+    clearNotificationHistory
+  } = useDrawingAlerts(symbol, timeframe, drawings, currentPriceVal, candles, setDrawings);
+
+  // Keyboard Shortcuts for Drawings (Delete, Escape, Ctrl+Z, Ctrl+Y)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedDrawingId) {
+          const d = drawings.find((item) => item.id === selectedDrawingId);
+          if (d && !d.locked) {
+            deleteDrawing(selectedDrawingId);
+          }
+        }
+      } else if (e.key === 'Escape') {
+        if (activeTool !== 'cursor') {
+          setActiveTool('cursor');
+          setPendingPoints([]);
+        } else if (selectedDrawingId) {
+          selectDrawing(null);
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedDrawingId, drawings, activeTool, deleteDrawing, selectDrawing, setActiveTool, setPendingPoints, undo, redo]);
+
   const scanResult: ScannerAnalysisResult = useMemo(() => {
     return runChartScan(
       symbol,
@@ -503,17 +615,15 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Capture pointer so drag events continue even outside the canvas boundaries
     try {
       canvas.setPointerCapture(e.pointerId);
-    } catch (err) {
-      // ignore
-    }
+    } catch (err) {}
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const { chartWidth, chartHeight } = chartDimsRef.current;
+    const coordCtx = coordCtxRef.current;
 
     dragStartPosRef.current = { x: e.clientX, y: e.clientY };
     initialPanOffsetRef.current = panOffset;
@@ -524,14 +634,73 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     if (x >= chartWidth) {
       dragModeRef.current = 'priceScale';
       setCursorStyle('ns-resize');
+      return;
     } else if (y >= chartHeight) {
       dragModeRef.current = 'timeScale';
       setCursorStyle('ew-resize');
-    } else {
+      return;
+    }
+
+    if (!coordCtx) {
       dragModeRef.current = 'chart';
       setCursorStyle('grabbing');
+      return;
     }
-  }, [panOffset, priceOffset, priceScaleRatio, candleWidth]);
+
+    // DRAWING CREATION MODE
+    if (activeTool !== 'cursor') {
+      const clickPoint: ChartPoint = {
+        time: xToTime(x, coordCtx),
+        price: convertYToPrice(y, coordCtx)
+      };
+
+      if (activeTool === 'horizontal_line' || activeTool === 'vertical_line') {
+        completeNewDrawing(activeTool, [clickPoint]);
+      } else {
+        if (pendingPoints.length === 0) {
+          setPendingPoints([clickPoint]);
+        } else {
+          completeNewDrawing(activeTool, [...pendingPoints, clickPoint]);
+        }
+      }
+      return;
+    }
+
+    // CURSOR SELECTION & MANIPULATION MODE
+    const revDrawings = [...drawings].reverse();
+    let hitItem: { drawing: ChartDrawing; handleIndex: number | null } | null = null;
+
+    for (const d of revDrawings) {
+      const res = hitTestDrawing(d, x, y, coordCtx, 9);
+      if (res.isHit) {
+        hitItem = { drawing: d, handleIndex: res.handleIndex };
+        break;
+      }
+    }
+
+    if (hitItem) {
+      selectDrawing(hitItem.drawing.id);
+      if (!hitItem.drawing.locked) {
+        drawingDragModeRef.current = hitItem.handleIndex !== null ? 'handle' : 'drawing';
+        activeHandleIndexRef.current = hitItem.handleIndex;
+        drawingDragStartPointRef.current = {
+          time: xToTime(x, coordCtx),
+          price: convertYToPrice(y, coordCtx)
+        };
+        drawingSnapshotRef.current = {
+          ...hitItem.drawing,
+          points: hitItem.drawing.points.map((p) => ({ ...p }))
+        };
+        setCursorStyle(hitItem.handleIndex !== null ? 'crosshair' : 'move');
+      }
+      return;
+    }
+
+    // No drawing hit: deselect and allow standard chart pan
+    selectDrawing(null);
+    dragModeRef.current = 'chart';
+    setCursorStyle('grabbing');
+  }, [panOffset, priceOffset, priceScaleRatio, candleWidth, activeTool, pendingPoints, completeNewDrawing, setPendingPoints, drawings, selectDrawing]);
 
   // --- Pointer Move (Mouse & Touch drag) ---
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -545,13 +714,58 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
     setMousePos({ x, y });
 
+    // Handling Drawing Drag / Resize
+    if (drawingDragModeRef.current !== 'none' && drawingSnapshotRef.current && coordCtxRef.current && drawingDragStartPointRef.current) {
+      const coordCtx = coordCtxRef.current;
+      const currentHoverPoint: ChartPoint = {
+        time: xToTime(x, coordCtx),
+        price: convertYToPrice(y, coordCtx)
+      };
+
+      const deltaPrice = currentHoverPoint.price - drawingDragStartPointRef.current.price;
+      const deltaTime = currentHoverPoint.time - drawingDragStartPointRef.current.time;
+      const initialDrawing = drawingSnapshotRef.current;
+
+      if (drawingDragModeRef.current === 'drawing') {
+        const newPoints = initialDrawing.points.map((p) => ({
+          time: p.time + deltaTime,
+          price: p.price + deltaPrice
+        }));
+        updateDrawing(initialDrawing.id, { points: newPoints });
+      } else if (drawingDragModeRef.current === 'handle' && activeHandleIndexRef.current !== null) {
+        const handleIdx = activeHandleIndexRef.current;
+        const newPoints = initialDrawing.points.map((p, idx) =>
+          idx === handleIdx ? currentHoverPoint : p
+        );
+        updateDrawing(initialDrawing.id, { points: newPoints });
+      }
+      return;
+    }
+
     if (dragModeRef.current === 'none') {
       if (x >= chartWidth) {
         setCursorStyle('ns-resize');
       } else if (y >= chartHeight) {
         setCursorStyle('ew-resize');
-      } else {
+      } else if (activeTool !== 'cursor') {
         setCursorStyle('crosshair');
+      } else {
+        // Hover test on drawings
+        if (coordCtxRef.current) {
+          const revDrawings = [...drawings].reverse();
+          let hovered = false;
+          for (const d of revDrawings) {
+            const res = hitTestDrawing(d, x, y, coordCtxRef.current, 8);
+            if (res.isHit) {
+              setCursorStyle(res.handleIndex !== null ? 'pointer' : 'move');
+              hovered = true;
+              break;
+            }
+          }
+          if (!hovered) setCursorStyle('crosshair');
+        } else {
+          setCursorStyle('crosshair');
+        }
       }
       return;
     }
@@ -563,26 +777,23 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       // 1. Horizontal Pan (free scrolling left and right)
       const candlesMoved = deltaX / candleWidth;
       const newPan = initialPanOffsetRef.current + candlesMoved;
-      // Clamp pan bounds so user doesn't get lost in infinity
       const maxPan = candles.length - 2;
-      const minPan = -45; // allows generous right margin forward space
+      const minPan = -45;
       setPanOffset(Math.max(minPan, Math.min(maxPan, newPan)));
 
-      // 2. Vertical Pan (shifts price scale up and down freely)
+      // 2. Vertical Pan
       setAutoScale(false);
       setPriceOffset(initialPriceOffsetRef.current + deltaY);
     } else if (dragModeRef.current === 'priceScale') {
-      // Dragging price scale stretches/compresses vertical price range
       setAutoScale(false);
       const scaleMultiplier = Math.pow(1.008, deltaY);
       setPriceScaleRatio(Math.max(0.1, Math.min(10, initialPriceScaleRef.current * scaleMultiplier)));
     } else if (dragModeRef.current === 'timeScale') {
-      // Dragging time scale stretches/compresses horizontal candle width
       const scaleMultiplier = Math.pow(1.008, deltaX);
       const newWidth = Math.max(3, Math.min(65, initialCandleWidthRef.current * scaleMultiplier));
       setCandleWidth(newWidth);
     }
-  }, [candleWidth, candles.length]);
+  }, [candleWidth, candles.length, activeTool, drawings, updateDrawing]);
 
   // --- Pointer Up (Mouse & Touch end) ---
   const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -592,6 +803,16 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         canvas.releasePointerCapture(e.pointerId);
       } catch (err) {}
     }
+
+    if (drawingDragModeRef.current !== 'none') {
+      drawingDragModeRef.current = 'none';
+      activeHandleIndexRef.current = null;
+      drawingDragStartPointRef.current = null;
+      drawingSnapshotRef.current = null;
+      setCursorStyle('crosshair');
+      return;
+    }
+
     dragModeRef.current = 'none';
     setCursorStyle('crosshair');
   }, []);
@@ -1022,6 +1243,54 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       drawSignalLevel(activeSignal.stopLoss, 'SL', '#ef4444', '#b91c1c');
     }
 
+    // 3.6 Coordinate Context & User Chart Drawings
+    const coordCtx: CoordinateContext = {
+      candles,
+      timeframe,
+      candleWidth,
+      panOffset,
+      chartWidth,
+      chartHeight,
+      effectiveMin,
+      effectiveRange
+    };
+    coordCtxRef.current = coordCtx;
+
+    for (const drawing of drawings) {
+      const isSelected = selectedDrawingId === drawing.id;
+      drawChartElement(ctx, drawing, coordCtx, isSelected);
+    }
+
+    // 3.7 Draw In-Progress Drawing Preview
+    if (pendingPoints.length > 0 && mousePos && activeTool !== 'cursor') {
+      const hoverPt: ChartPoint = {
+        time: xToTime(mousePos.x, coordCtx),
+        price: convertYToPrice(mousePos.y, coordCtx)
+      };
+
+      const previewDrawing: ChartDrawing = {
+        id: 'preview',
+        asset: symbol,
+        type: activeTool,
+        name: 'Preview',
+        points: [...pendingPoints, hoverPt],
+        color: '#f59e0b',
+        fillColor: '#f59e0b',
+        fillOpacity: 0.14,
+        thickness: 2,
+        lineStyle: 'dashed',
+        glow: true,
+        glowColor: '#f59e0b',
+        glowIntensity: 6,
+        locked: false,
+        visible: true,
+        alerts: [],
+        createdAt: 0,
+        updatedAt: 0
+      };
+      drawChartElement(ctx, previewDrawing, coordCtx, false);
+    }
+
     // 4. Draw Current Live Market Price Line & Tag
     const latestCandle = candles[candles.length - 1];
     if (latestCandle) {
@@ -1128,7 +1397,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     mousePos,
     timeframe,
     marketStructure,
-    containerSize
+    containerSize,
+    drawings,
+    selectedDrawingId,
+    pendingPoints,
+    activeTool
   ]);
 
   // Current or inspected candle metrics for toolbar header
@@ -1253,29 +1526,97 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           </div>
         )}
 
-        {/* Fullscreen Canvas Area */}
-        <div className="flex-1 relative overflow-hidden w-full h-full">
-          {isLoading && (
-            <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
-              <div className="flex flex-col items-center gap-2">
-                <Activity className="w-6 h-6 text-amber-500 animate-spin" />
-                <span className="text-xs text-slate-300 font-mono">Loading market chart data...</span>
-              </div>
-            </div>
-          )}
-
-          <canvas
-            ref={canvasRef}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
-            onPointerLeave={handlePointerLeave}
-            onDoubleClick={handleDoubleClick}
-            style={{ cursor: cursorStyle }}
-            className="absolute inset-0 w-full h-full block touch-none"
+        {/* Fullscreen Canvas Area with Left Drawing Toolbar */}
+        <div className="flex-1 flex overflow-hidden w-full h-full relative">
+          <DrawingToolbar
+            activeTool={activeTool}
+            onSelectTool={setActiveTool}
+            drawingsCount={drawings.length}
+            activeAlertsCount={drawings.reduce((acc, d) => acc + (d.alerts?.filter((a) => a.enabled).length || 0), 0)}
+            canUndo={canUndo}
+            canRedo={canRedo}
+            onUndo={undo}
+            onRedo={redo}
+            onOpenManager={() => setIsManagerModalOpen(true)}
+            onOpenAlerts={() => setIsManagerModalOpen(true)}
+            onClearAll={clearAllDrawings}
+            areAllVisible={areAllDrawingsVisible}
+            onToggleAllVisibility={toggleAllVisibility}
           />
+
+          <div className="flex-1 relative overflow-hidden w-full h-full">
+            {isLoading && (
+              <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
+                <div className="flex flex-col items-center gap-2">
+                  <Activity className="w-6 h-6 text-amber-500 animate-spin" />
+                  <span className="text-xs text-slate-300 font-mono">Loading market chart data...</span>
+                </div>
+              </div>
+            )}
+
+            <canvas
+              ref={canvasRef}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              onPointerLeave={handlePointerLeave}
+              onDoubleClick={handleDoubleClick}
+              style={{ cursor: cursorStyle }}
+              className="absolute inset-0 w-full h-full block touch-none"
+            />
+
+            {/* Selected Drawing Floating Properties Bar */}
+            {selectedDrawing && (
+              <DrawingPropertiesBar
+                drawing={selectedDrawing}
+                onUpdate={(updates) => updateDrawing(selectedDrawing.id, updates)}
+                onDuplicate={() => duplicateDrawing(selectedDrawing.id)}
+                onDelete={() => deleteDrawing(selectedDrawing.id)}
+                onOpenAlertModal={() => setIsAlertModalOpen(true)}
+              />
+            )}
+
+            {/* Floating Alert Notification Toast */}
+            <AlertNotificationToast
+              notifications={notifications}
+              onDismiss={dismissNotification}
+            />
+          </div>
         </div>
+
+        {/* Alert Configuration Modal in Fullscreen */}
+        {isAlertModalOpen && selectedDrawing && (
+          <DrawingAlertModal
+            drawing={selectedDrawing}
+            timeframe={timeframe}
+            symbol={symbol}
+            onClose={() => setIsAlertModalOpen(false)}
+            onAddAlert={(alertData) => addAlertToDrawing(selectedDrawing.id, alertData)}
+            onRemoveAlert={(alertId) => removeAlertFromDrawing(selectedDrawing.id, alertId)}
+            onToggleAlert={(alertId, enabled) => toggleAlertStatus(selectedDrawing.id, alertId, enabled)}
+          />
+        )}
+
+        {/* Drawings Object Tree & Global Alerts Manager Modal in Fullscreen */}
+        {isManagerModalOpen && (
+          <DrawingManagerModal
+            symbol={symbol}
+            drawings={drawings}
+            selectedDrawingId={selectedDrawingId}
+            onSelectDrawing={selectDrawing}
+            onToggleVisibility={toggleVisibility}
+            onToggleLock={toggleLock}
+            onRenameDrawing={renameDrawing}
+            onDuplicateDrawing={duplicateDrawing}
+            onDeleteDrawing={deleteDrawing}
+            onToggleAlert={toggleAlertStatus}
+            onDeleteAlert={removeAlertFromDrawing}
+            notificationHistory={notificationHistory}
+            onClearHistory={clearNotificationHistory}
+            onClose={() => setIsManagerModalOpen(false)}
+          />
+        )}
       </div>
     );
   }
@@ -1818,58 +2159,94 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       </div>
 
       {/* ============================================================== */}
-      {/* 4. COMPACT CHART (Requirement 3 & 4)                           */}
+      {/* 4. COMPACT CHART WITH DRAWING TOOLBAR (Requirement 3 & 4)      */}
       {/* ============================================================== */}
-      <div className="relative overflow-hidden w-full h-[270px] sm:h-[310px] lg:h-full lg:flex-1 min-h-[250px] shrink-0 lg:shrink">
-        {isLoading && (
-          <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
-            <div className="flex flex-col items-center gap-2">
-              <Activity className="w-6 h-6 text-amber-500 animate-spin" />
-              <span className="text-xs text-slate-300 font-mono">Loading historical market data...</span>
-            </div>
-          </div>
-        )}
-
-        {!isLoading && !fetchError && candles.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center p-4 bg-[#070709]/80 z-10 text-center">
-            <div className="max-w-sm space-y-2 p-4 rounded-lg bg-[#0c0d12] border border-[#1e202d] shadow-xl">
-              <div className="text-amber-400 text-sm font-semibold flex items-center justify-center gap-1.5">
-                Waiting for Market Trades
-              </div>
-              <div className="text-xs text-slate-400">
-                No historical market data recorded for <span className="font-mono text-slate-200">{symbol}</span> yet.
-                The live chart will start updating as trades arrive.
-              </div>
-            </div>
-          </div>
-        )}
-
-        {fetchError && (
-          <div className="absolute inset-0 flex items-center justify-center p-4 bg-[#070709]/90 z-10 text-center">
-            <div className="max-w-xs space-y-2">
-              <div className="text-red-400 text-sm font-semibold">Failed to load candles</div>
-              <div className="text-xs text-slate-400">{fetchError}</div>
-              <button
-                onClick={handleManualRetry}
-                className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-black font-bold rounded text-xs transition-colors cursor-pointer"
-              >
-                Retry
-              </button>
-            </div>
-          </div>
-        )}
-
-        <canvas
-          ref={canvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          onPointerLeave={handlePointerLeave}
-          onDoubleClick={handleDoubleClick}
-          style={{ cursor: cursorStyle }}
-          className="absolute inset-0 w-full h-full block touch-none"
+      <div className="relative overflow-hidden w-full h-[270px] sm:h-[310px] lg:h-full lg:flex-1 min-h-[250px] shrink-0 lg:shrink flex border-y border-[#181a24]">
+        {/* Drawing Tools Left Toolbar */}
+        <DrawingToolbar
+          activeTool={activeTool}
+          onSelectTool={setActiveTool}
+          drawingsCount={drawings.length}
+          activeAlertsCount={drawings.reduce((acc, d) => acc + (d.alerts?.filter((a) => a.enabled).length || 0), 0)}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={undo}
+          onRedo={redo}
+          onOpenManager={() => setIsManagerModalOpen(true)}
+          onOpenAlerts={() => setIsManagerModalOpen(true)}
+          onClearAll={clearAllDrawings}
+          areAllVisible={areAllDrawingsVisible}
+          onToggleAllVisibility={toggleAllVisibility}
         />
+
+        <div className="flex-1 relative overflow-hidden w-full h-full">
+          {isLoading && (
+            <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
+              <div className="flex flex-col items-center gap-2">
+                <Activity className="w-6 h-6 text-amber-500 animate-spin" />
+                <span className="text-xs text-slate-300 font-mono">Loading historical market data...</span>
+              </div>
+            </div>
+          )}
+
+          {!isLoading && !fetchError && candles.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center p-4 bg-[#070709]/80 z-10 text-center">
+              <div className="max-w-sm space-y-2 p-4 rounded-lg bg-[#0c0d12] border border-[#1e202d] shadow-xl">
+                <div className="text-amber-400 text-sm font-semibold flex items-center justify-center gap-1.5">
+                  Waiting for Market Trades
+                </div>
+                <div className="text-xs text-slate-400">
+                  No historical market data recorded for <span className="font-mono text-slate-200">{symbol}</span> yet.
+                  The live chart will start updating as trades arrive.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {fetchError && (
+            <div className="absolute inset-0 flex items-center justify-center p-4 bg-[#070709]/90 z-10 text-center">
+              <div className="max-w-xs space-y-2">
+                <div className="text-red-400 text-sm font-semibold">Failed to load candles</div>
+                <div className="text-xs text-slate-400">{fetchError}</div>
+                <button
+                  onClick={handleManualRetry}
+                  className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-black font-bold rounded text-xs transition-colors cursor-pointer"
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          )}
+
+          <canvas
+            ref={canvasRef}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+            onPointerLeave={handlePointerLeave}
+            onDoubleClick={handleDoubleClick}
+            style={{ cursor: cursorStyle }}
+            className="absolute inset-0 w-full h-full block touch-none"
+          />
+
+          {/* Selected Drawing Floating Properties Bar */}
+          {selectedDrawing && (
+            <DrawingPropertiesBar
+              drawing={selectedDrawing}
+              onUpdate={(updates) => updateDrawing(selectedDrawing.id, updates)}
+              onDuplicate={() => duplicateDrawing(selectedDrawing.id)}
+              onDelete={() => deleteDrawing(selectedDrawing.id)}
+              onOpenAlertModal={() => setIsAlertModalOpen(true)}
+            />
+          )}
+
+          {/* Floating Alert Notification Toast */}
+          <AlertNotificationToast
+            notifications={notifications}
+            onDismiss={dismissNotification}
+          />
+        </div>
       </div>
 
       {/* ============================================================== */}
@@ -1951,6 +2328,39 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           <span>NWWT Confluence</span>
         </div>
       </div>
+
+      {/* Alert Configuration Modal */}
+      {isAlertModalOpen && selectedDrawing && (
+        <DrawingAlertModal
+          drawing={selectedDrawing}
+          timeframe={timeframe}
+          symbol={symbol}
+          onClose={() => setIsAlertModalOpen(false)}
+          onAddAlert={(alertData) => addAlertToDrawing(selectedDrawing.id, alertData)}
+          onRemoveAlert={(alertId) => removeAlertFromDrawing(selectedDrawing.id, alertId)}
+          onToggleAlert={(alertId, enabled) => toggleAlertStatus(selectedDrawing.id, alertId, enabled)}
+        />
+      )}
+
+      {/* Drawings Object Tree & Global Alerts Manager Modal */}
+      {isManagerModalOpen && (
+        <DrawingManagerModal
+          symbol={symbol}
+          drawings={drawings}
+          selectedDrawingId={selectedDrawingId}
+          onSelectDrawing={selectDrawing}
+          onToggleVisibility={toggleVisibility}
+          onToggleLock={toggleLock}
+          onRenameDrawing={renameDrawing}
+          onDuplicateDrawing={duplicateDrawing}
+          onDeleteDrawing={deleteDrawing}
+          onToggleAlert={toggleAlertStatus}
+          onDeleteAlert={removeAlertFromDrawing}
+          notificationHistory={notificationHistory}
+          onClearHistory={clearNotificationHistory}
+          onClose={() => setIsManagerModalOpen(false)}
+        />
+      )}
     </div>
   );
 };
