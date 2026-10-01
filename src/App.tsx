@@ -188,9 +188,13 @@ export default function App() {
   // Completed trades (WIN / LOSS / EXPIRED) must never leave levels behind on active chart
   const activeSignalForAsset = useMemo(() => {
     if (!selectedSymbolName) return null;
-    return (
-      performanceSignals.find((s) => s.asset === selectedSymbolName && s.status === 'ACTIVE') || null
+    const activeList = performanceSignals.filter(
+      (s) => s.asset === selectedSymbolName && s.status === 'ACTIVE'
     );
+    // Prioritize AI Filtered setup if available, otherwise original
+    const aiFiltered = activeList.find((s) => s.modelType === 'ai_filtered');
+    if (aiFiltered) return aiFiltered;
+    return activeList[0] || null;
   }, [performanceSignals, selectedSymbolName]);
 
   // Open asset chart on asset click (used by Watchlist & Scanner)

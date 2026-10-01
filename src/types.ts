@@ -100,6 +100,42 @@ export interface MarketStructureResult {
   currentTrend: 'bullish' | 'bearish' | 'neutral';
 }
 
+// Market Regime Definitions
+export type MarketRegime =
+  | 'trending_up'
+  | 'trending_down'
+  | 'ranging'
+  | 'high_volatility'
+  | 'low_volatility'
+  | 'transition';
+
+export type AIValidationStatus = 'allow' | 'reject' | 'wait';
+
+export type ModelTrackType =
+  | 'original'
+  | 'inverse'
+  | 'ai_filtered'
+  | 'ai_filtered_inverse';
+
+export interface SignalConditionsRecord {
+  trendDirection?: string;
+  trendStrength?: number;
+  marketRegime?: MarketRegime;
+  structureState?: string;
+  swingHigh?: number;
+  swingLow?: number;
+  supportLevel?: number;
+  resistanceLevel?: number;
+  hasBOS?: boolean;
+  hasCHoCH?: boolean;
+  isRetest?: boolean;
+  isFakeout?: boolean;
+  riskRewardRatio?: number;
+  distanceToTpPercent?: number;
+  distanceToSlPercent?: number;
+  volatilityRatio?: number;
+}
+
 // NWWT Scanner Signal Definitions (UP / DOWN only) with V8 Performance Engine
 export type SignalStatus = 'ACTIVE' | 'WIN' | 'LOSS' | 'EXPIRED';
 
@@ -117,7 +153,7 @@ export interface ScannerSignalItem {
   confidence: number;
   reason: string;
   timestamp: number;
-  // V8 Performance Engine Fields
+  // Performance Engine Fields
   status: SignalStatus;
   statusReason?: string;
   completedAt?: number;
@@ -127,6 +163,18 @@ export interface ScannerSignalItem {
   expiryTimestamp: number;
   highestReached?: number;
   lowestReached?: number;
+  // Intelligence Layer & Research Mode Extensions
+  marketRegime?: MarketRegime;
+  aiValidation?: {
+    status: AIValidationStatus;
+    confidence: number;
+    reason: string;
+    regime: MarketRegime;
+  };
+  modelType?: ModelTrackType;
+  durationMs?: number;
+  maxDrawdownPercent?: number;
+  signalConditions?: SignalConditionsRecord;
 }
 
 export interface PendingRetestItem {
@@ -146,6 +194,41 @@ export interface SetupPerformance {
   active: number;
   tpRate: number; // Win rate %
   avgPnlPercent: number;
+  expectancy?: number;
+  maxLosingStreak?: number;
+  drawdown?: number;
+}
+
+export interface WalkForwardMetrics {
+  isValid: boolean;
+  sampleSize: number;
+  minRequired: number;
+  inSample: {
+    count: number;
+    settled: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    profitFactor: number;
+    expectancy: number;
+    avgWinPercent: number;
+    avgLossPercent: number;
+    maxLosingStreak: number;
+  } | null;
+  outOfSample: {
+    count: number;
+    settled: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    profitFactor: number;
+    expectancy: number;
+    avgWinPercent: number;
+    avgLossPercent: number;
+    maxLosingStreak: number;
+  } | null;
+  winRateEfficiency?: number;
+  message: string;
 }
 
 export interface SignalPerformanceStats {
@@ -159,10 +242,23 @@ export interface SignalPerformanceStats {
   avgWinPercent: number;
   avgLossPercent: number;
   profitFactor: number;
+  expectancy?: number;
+  maxLosingStreak?: number;
+  drawdown?: number;
+  sampleSize?: number;
+  hasSufficientSample?: boolean;
   bySetupType: Record<string, SetupPerformance>;
   byTimeframe: Record<string, SetupPerformance>;
   byDirection: Record<'UP' | 'DOWN', SetupPerformance>;
   byAsset: Record<string, SetupPerformance>;
+  byRegime?: Record<string, SetupPerformance>;
+  byModel?: {
+    original: SignalPerformanceStats;
+    inverse: SignalPerformanceStats;
+    ai_filtered: SignalPerformanceStats;
+    ai_filtered_inverse: SignalPerformanceStats;
+  };
+  walkForward?: WalkForwardMetrics;
 }
 
 export interface ScannerState {

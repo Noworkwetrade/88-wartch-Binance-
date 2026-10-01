@@ -237,7 +237,7 @@ export function evaluateSignalsWithTicker(
 /**
  * Calculates aggregated performance statistics
  */
-export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalPerformanceStats {
+export function calculatePerformanceStats(signals: ScannerSignalItem[], isSubModel = false): SignalPerformanceStats {
   let activeCount = 0;
   let winsCount = 0;
   let lossesCount = 0;
@@ -253,8 +253,10 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
     DOWN: { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0, _pnlSum: 0 }
   };
   const byAsset: Record<string, SetupPerformance & { _pnlSum: number }> = {};
+  const byRegime: Record<string, SetupPerformance & { _pnlSum: number }> = {};
 
   function updateGroup(group: Record<string, SetupPerformance & { _pnlSum: number }>, key: string, status: string, pnl: number) {
+    if (!key) return;
     if (!group[key]) {
       group[key] = { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0, _pnlSum: 0 };
     }
@@ -273,7 +275,15 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
     const settled = item.wins + item.losses;
     item.tpRate = settled > 0 ? parseFloat(((item.wins / settled) * 100).toFixed(1)) : 0;
     item.avgPnlPercent = settled > 0 ? parseFloat((item._pnlSum / settled).toFixed(2)) : 0;
+    const winFrac = settled > 0 ? item.wins / settled : 0;
+    const lossFrac = settled > 0 ? item.losses / settled : 0;
+    const avgW = item.wins > 0 ? winPnlSum / (winsCount || 1) : 0;
+    const avgL = item.losses > 0 ? lossPnlSum / (lossesCount || 1) : 0;
+    item.expectancy = parseFloat((winFrac * avgW - lossFrac * avgL).toFixed(2));
   }
+
+  let maxLosingStreak = 0;
+  let curStreak = 0;
 
   for (const s of signals) {
     const pnl = s.pnlPercent || 0;
@@ -281,9 +291,12 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
     else if (s.status === 'WIN') {
       winsCount++;
       winPnlSum += pnl;
+      curStreak = 0;
     } else if (s.status === 'LOSS') {
       lossesCount++;
       lossPnlSum += Math.abs(pnl);
+      curStreak++;
+      if (curStreak > maxLosingStreak) maxLosingStreak = curStreak;
     } else if (s.status === 'EXPIRED') {
       expiredCount++;
     }
@@ -294,6 +307,9 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
       updateGroup(byDirection, s.direction, s.status, pnl);
     }
     updateGroup(byAsset, s.asset, s.status, pnl);
+    if (s.marketRegime) {
+      updateGroup(byRegime, s.marketRegime, s.status, pnl);
+    }
   }
 
   const settledTotal = winsCount + lossesCount;
@@ -301,6 +317,24 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
   const avgWinPercent = winsCount > 0 ? parseFloat((winPnlSum / winsCount).toFixed(2)) : 0;
   const avgLossPercent = lossesCount > 0 ? parseFloat((lossPnlSum / lossesCount).toFixed(2)) : 0;
   const profitFactor = lossPnlSum > 0 ? parseFloat((winPnlSum / lossPnlSum).toFixed(2)) : winsCount > 0 ? 9.99 : 0;
+
+  const winRateFrac = settledTotal > 0 ? winsCount / settledTotal : 0;
+  const lossRateFrac = settledTotal > 0 ? lossesCount / settledTotal : 0;
+  const expectancy = parseFloat((winRateFrac * avgWinPercent - lossRateFrac * avgLossPercent).toFixed(2));
+
+  // Compute drawdown across chronological settled trades
+  let peak = 0;
+  let equity = 0;
+  let maxDrawdown = 0;
+  for (const s of [...signals].reverse()) {
+    if (s.status === 'WIN' || s.status === 'LOSS') {
+      const pnl = s.pnlPercent || 0;
+      equity += pnl;
+      if (equity > peak) peak = equity;
+      const dd = peak - equity;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+    }
+  }
 
   // Clean helper properties from result
   const cleanRecord = (rec: Record<string, SetupPerformance & { _pnlSum: number }>): Record<string, SetupPerformance> => {
@@ -313,11 +347,93 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
         expired: v.expired,
         active: v.active,
         tpRate: v.tpRate,
-        avgPnlPercent: v.avgPnlPercent
+        avgPnlPercent: v.avgPnlPercent,
+        expectancy: v.expectancy
       };
     }
     return out;
   };
+
+  // Walk-forward validation calculation across settled trades
+  const settledSignals = signals.filter((s) => s.status === 'WIN' || s.status === 'LOSS');
+  let walkForward = undefined;
+  if (settledSignals.length >= 8) {
+    const sorted = [...settledSignals].sort((a, b) => a.timestamp - b.timestamp);
+    const splitIdx = Math.floor(sorted.length * 0.6);
+    const inSamp = sorted.slice(0, splitIdx);
+    const outSamp = sorted.slice(splitIdx);
+
+    const calcSub = (trades: ScannerSignalItem[]) => {
+      let w = 0, l = 0, wPnl = 0, lPnl = 0, maxLs = 0, cs = 0;
+      for (const t of trades) {
+        const p = t.pnlPercent || 0;
+        if (t.status === 'WIN') {
+          w++;
+          wPnl += p;
+          cs = 0;
+        } else if (t.status === 'LOSS') {
+          l++;
+          lPnl += Math.abs(p);
+          cs++;
+          if (cs > maxLs) maxLs = cs;
+        }
+      }
+      const st = w + l;
+      const wr = st > 0 ? (w / st) * 100 : 0;
+      const aw = w > 0 ? wPnl / w : 0;
+      const al = l > 0 ? lPnl / l : 0;
+      const pf = lPnl > 0 ? wPnl / lPnl : w > 0 ? 9.99 : 0;
+      const exp = st > 0 ? (w / st) * aw - (l / st) * al : 0;
+      return {
+        count: trades.length,
+        settled: st,
+        wins: w,
+        losses: l,
+        winRate: parseFloat(wr.toFixed(1)),
+        profitFactor: parseFloat(pf.toFixed(2)),
+        expectancy: parseFloat(exp.toFixed(2)),
+        avgWinPercent: parseFloat(aw.toFixed(2)),
+        avgLossPercent: parseFloat(al.toFixed(2)),
+        maxLosingStreak: maxLs
+      };
+    };
+
+    const inMetrics = calcSub(inSamp);
+    const outMetrics = calcSub(outSamp);
+    const efficiency = inMetrics.winRate > 0 ? (outMetrics.winRate / inMetrics.winRate) * 100 : 0;
+
+    walkForward = {
+      isValid: true,
+      sampleSize: sorted.length,
+      minRequired: 8,
+      inSample: inMetrics,
+      outOfSample: outMetrics,
+      winRateEfficiency: parseFloat(efficiency.toFixed(1)),
+      message:
+        efficiency >= 80
+          ? 'Robust: Out-of-sample forward validation matches baseline.'
+          : 'Warning: Out-of-sample forward divergence detected.'
+    };
+  } else {
+    walkForward = {
+      isValid: false,
+      sampleSize: settledSignals.length,
+      minRequired: 8,
+      inSample: null,
+      outOfSample: null,
+      message: 'Need >= 8 completed trades for walk-forward validation.'
+    };
+  }
+
+  // Model-specific sub-stats (only computed at root level to prevent recursion)
+  const byModel = !isSubModel
+    ? {
+        original: calculatePerformanceStats(signals.filter((s) => (s.modelType || 'original') === 'original'), true),
+        inverse: calculatePerformanceStats(signals.filter((s) => s.modelType === 'inverse'), true),
+        ai_filtered: calculatePerformanceStats(signals.filter((s) => s.modelType === 'ai_filtered'), true),
+        ai_filtered_inverse: calculatePerformanceStats(signals.filter((s) => s.modelType === 'ai_filtered_inverse'), true)
+      }
+    : undefined;
 
   return {
     totalSignals: signals.length,
@@ -330,6 +446,11 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
     avgWinPercent,
     avgLossPercent,
     profitFactor,
+    expectancy,
+    maxLosingStreak,
+    drawdown: parseFloat(maxDrawdown.toFixed(2)),
+    sampleSize: settledTotal,
+    hasSufficientSample: settledTotal >= 10,
     bySetupType: cleanRecord(bySetupType),
     byTimeframe: cleanRecord(byTimeframe),
     byDirection: {
@@ -352,6 +473,9 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[]): SignalP
         avgPnlPercent: byDirection.DOWN.avgPnlPercent
       }
     },
-    byAsset: cleanRecord(byAsset)
+    byAsset: cleanRecord(byAsset),
+    byRegime: cleanRecord(byRegime),
+    byModel,
+    walkForward
   };
 }

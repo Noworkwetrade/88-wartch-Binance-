@@ -1226,6 +1226,24 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               </span>
             </div>
             <div className="flex items-center gap-2">
+              {activeSignal.aiValidation && (
+                <span
+                  className={`px-1.5 py-0.2 rounded text-[10px] font-bold border ${
+                    activeSignal.aiValidation.status === 'allow'
+                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                      : activeSignal.aiValidation.status === 'reject'
+                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                      : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+                  }`}
+                >
+                  AI: {activeSignal.aiValidation.status.toUpperCase()}
+                </span>
+              )}
+              {activeSignal.marketRegime && (
+                <span className="px-1.5 py-0.2 rounded text-[10px] bg-[#1a1d28] text-slate-300 border border-[#282c3d] capitalize hidden sm:inline">
+                  {activeSignal.marketRegime.replace(/_/g, ' ')}
+                </span>
+              )}
               <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                 WATCHING LIVE
@@ -1357,6 +1375,24 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               </span>
             </div>
             <div className="flex items-center gap-2">
+              {activeSignal.aiValidation && (
+                <span
+                  className={`px-1.5 py-0.2 rounded text-[10px] font-bold border ${
+                    activeSignal.aiValidation.status === 'allow'
+                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                      : activeSignal.aiValidation.status === 'reject'
+                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                      : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+                  }`}
+                >
+                  AI: {activeSignal.aiValidation.status.toUpperCase()}
+                </span>
+              )}
+              {activeSignal.marketRegime && (
+                <span className="px-1.5 py-0.2 rounded text-[10px] bg-[#1a1d28] text-slate-300 border border-[#282c3d] capitalize hidden sm:inline">
+                  {activeSignal.marketRegime.replace(/_/g, ' ')}
+                </span>
+              )}
               <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                 WATCHING LIVE

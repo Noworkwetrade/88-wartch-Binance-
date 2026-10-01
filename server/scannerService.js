@@ -1,7 +1,7 @@
 /**
- * NWWT Market Scanner Service - V8 Signal Performance Engine
+ * NWWT Market Scanner Service - Intelligence & 4-Model Research Engine
  *
- * Scans the Binance Spot USDT watchlist using strictly REAL CLOSED CANDLES.
+ * Scans the spot USDT watchlist using strictly REAL CLOSED CANDLES.
  * Evaluates pure NWWT technical structure:
  * - Market Structure (Bullish / Bearish / Range)
  * - Support & Resistance key levels
@@ -9,25 +9,32 @@
  * - Break and Retest: Retest strengthens an existing setup (boosts confidence)
  * - Fakeout Rejection (Liquidity sweep & immediate reversal)
  * - Engulfing Confirmation at key structure levels
- * - Trendline Breaks
- * - Signals ranked highest probability to lowest probability
  *
- * V8 SIGNAL PERFORMANCE ENGINE:
- * - Every signal gets an entryPrice, takeProfit (TP), and stopLoss (SL)
- * - Watches active signals using live market data in real time
- * - Records signal as WIN when TP is reached
- * - Records signal as LOSS when SL is reached
- * - If neither is reached, keeps watching until the defined expiry period
- * - CONSERVATIVE RULE: If TP and SL are both touched in the same candle/period,
- *   record as LOSS (conservative SL result).
- * - Tracks results by setup type, timeframe, asset, and direction
- * - Computes TP rate and performance analytics without automated strategy perturbation
+ * AI MARKET STRUCTURE INTELLIGENCE LAYER:
+ * - Detects Market Regime: trending_up, trending_down, ranging, high_volatility, low_volatility, transition
+ * - Deep validation of trend strength, swing levels, S/R clearance, rejection/continuation wicks, R:R
+ * - Strict decision output: 'allow' | 'reject' | 'wait'
+ * - Adaptive performance filter with sample-size safeguards (minimum 4 samples required to adapt)
  *
- * Educational market analysis only. Never provides trading execution or financial advice.
+ * 4 INDEPENDENT RESEARCH MODES:
+ * 1. Original Strategy (baseline technical rules)
+ * 2. Inverse Strategy (flipped direction, mirrored TP & SL)
+ * 3. AI Filtered Strategy (only setups receiving 'allow' validation)
+ * 4. AI Filtered Inverse Strategy (inverse setups passing structural validation)
+ *
+ * WALK-FORWARD VALIDATION:
+ * - In-Sample (60%) vs Out-of-Sample (40%) split without future data leakage
+ * - Educational market analysis only. Never provides automated trade execution.
  */
 
 import { fetchKlines } from './binanceRest.js';
 import { marketCache } from './marketCache.js';
+import {
+  detectMarketRegime,
+  validateSetupWithStructureIntelligence,
+  createInverseSignal,
+  calculateWalkForwardValidation
+} from './structureIntelligence.js';
 
 // Top liquid USDT pairs prioritized for scanner depth
 const PRIORITY_SYMBOLS = [
@@ -68,8 +75,7 @@ class ScannerService {
     this.watchInterval = null;
     this.isScanning = false;
 
-    // V8 In-Memory Performance History
-    // Map of id -> ScannerSignalItem
+    // In-Memory Performance History: Map of id -> ScannerSignalItem
     this.performanceSignals = new Map();
   }
 
@@ -95,7 +101,7 @@ class ScannerService {
   }
 
   /**
-   * Helper to construct a V8 Signal with exact entry, TP, and SL
+   * Helper to construct a Signal Item with exact entry, TP, and SL
    */
   createSignalItem({
     symbol,
@@ -106,7 +112,11 @@ class ScannerService {
     invalidationLevel,
     confidence,
     reason,
-    timestamp
+    timestamp,
+    modelType = 'original',
+    marketRegime = 'ranging',
+    aiValidation = null,
+    signalConditions = null
   }) {
     const entryPrice = closePrice;
     let stopLoss = invalidationLevel;
@@ -117,24 +127,21 @@ class ScannerService {
     const expiryTimestamp = timestamp + expiryCandles * tfMins * 60 * 1000;
 
     if (direction === 'UP') {
-      // Ensure stopLoss is below entry with sensible floor
       if (!stopLoss || stopLoss >= entryPrice || (entryPrice - stopLoss) / entryPrice < 0.004) {
-        stopLoss = entryPrice * 0.985; // 1.5% stop
+        stopLoss = entryPrice * 0.985; // 1.5% default stop
       }
       const risk = entryPrice - stopLoss;
-      // 1.5x Risk-to-Reward ratio
-      takeProfit = entryPrice + risk * 1.5;
+      takeProfit = entryPrice + risk * 1.5; // 1.5R target
     } else {
-      // Ensure stopLoss is above entry with sensible ceiling
       if (!stopLoss || stopLoss <= entryPrice || (stopLoss - entryPrice) / entryPrice < 0.004) {
-        stopLoss = entryPrice * 1.015; // 1.5% stop
+        stopLoss = entryPrice * 1.015; // 1.5% default stop
       }
       const risk = stopLoss - entryPrice;
-      // 1.5x Risk-to-Reward ratio
-      takeProfit = entryPrice - risk * 1.5;
+      takeProfit = entryPrice - risk * 1.5; // 1.5R target
     }
 
-    const id = `${symbol}-${timeframe}-${setupType.toLowerCase().replace(/[^a-z0-9]/g, '')}-${direction.toLowerCase()}-${timestamp}`;
+    const typePrefix = modelType === 'original' ? '' : `-${modelType}`;
+    const id = `${symbol}-${timeframe}-${setupType.toLowerCase().replace(/[^a-z0-9]/g, '')}-${direction.toLowerCase()}-${timestamp}${typePrefix}`;
 
     return {
       id,
@@ -155,12 +162,16 @@ class ScannerService {
       expiryCandles,
       expiryTimestamp,
       highestReached: entryPrice,
-      lowestReached: entryPrice
+      lowestReached: entryPrice,
+      modelType,
+      marketRegime,
+      aiValidation,
+      signalConditions
     };
   }
 
   /**
-   * Live Market Data Watcher for Active Signals
+   * Live Market Data Watcher for Active Signals across all 4 research models
    */
   watchActiveSignals() {
     const now = Date.now();
@@ -181,7 +192,7 @@ class ScannerService {
       const isUp = signal.direction === 'UP';
 
       if (isUp) {
-        // V8 CONSERVATIVE RULE: If both TP and SL touched in same period/candle, use conservative SL result
+        // CONSERVATIVE RULE: If both TP and SL touched in same period, use conservative SL result
         const tpReached = currentPrice >= signal.takeProfit;
         const slReached = currentPrice <= signal.stopLoss;
 
@@ -189,6 +200,7 @@ class ScannerService {
           signal.status = 'LOSS';
           signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = signal.stopLoss;
           signal.pnlPercent = -Math.abs(((signal.entryPrice - signal.stopLoss) / signal.entryPrice) * 100);
           hasChanges = true;
@@ -196,6 +208,7 @@ class ScannerService {
           signal.status = 'WIN';
           signal.statusReason = `Take profit target ($${signal.takeProfit.toFixed(4)}) reached.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = signal.takeProfit;
           signal.pnlPercent = Math.abs(((signal.takeProfit - signal.entryPrice) / signal.entryPrice) * 100);
           hasChanges = true;
@@ -203,6 +216,7 @@ class ScannerService {
           signal.status = 'LOSS';
           signal.statusReason = `Stop loss level ($${signal.stopLoss.toFixed(4)}) reached.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = signal.stopLoss;
           signal.pnlPercent = -Math.abs(((signal.entryPrice - signal.stopLoss) / signal.entryPrice) * 100);
           hasChanges = true;
@@ -210,6 +224,7 @@ class ScannerService {
           signal.status = 'EXPIRED';
           signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = currentPrice;
           signal.pnlPercent = ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100;
           hasChanges = true;
@@ -223,6 +238,7 @@ class ScannerService {
           signal.status = 'LOSS';
           signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = signal.stopLoss;
           signal.pnlPercent = -Math.abs(((signal.stopLoss - signal.entryPrice) / signal.entryPrice) * 100);
           hasChanges = true;
@@ -230,6 +246,7 @@ class ScannerService {
           signal.status = 'WIN';
           signal.statusReason = `Take profit target ($${signal.takeProfit.toFixed(4)}) reached.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = signal.takeProfit;
           signal.pnlPercent = Math.abs(((signal.entryPrice - signal.takeProfit) / signal.entryPrice) * 100);
           hasChanges = true;
@@ -237,6 +254,7 @@ class ScannerService {
           signal.status = 'LOSS';
           signal.statusReason = `Stop loss level ($${signal.stopLoss.toFixed(4)}) reached.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = signal.stopLoss;
           signal.pnlPercent = -Math.abs(((signal.stopLoss - signal.entryPrice) / signal.entryPrice) * 100);
           hasChanges = true;
@@ -244,6 +262,7 @@ class ScannerService {
           signal.status = 'EXPIRED';
           signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
           signal.completedAt = now;
+          signal.durationMs = now - signal.timestamp;
           signal.exitPrice = currentPrice;
           signal.pnlPercent = ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
           hasChanges = true;
@@ -252,13 +271,11 @@ class ScannerService {
     }
 
     if (hasChanges) {
-      // Keep signals array in sync
       this.syncActiveSignalsArray();
     }
   }
 
   syncActiveSignalsArray() {
-    // Current signals shown in main view are active signals plus recent completed
     const all = Array.from(this.performanceSignals.values());
     all.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
     this.signals = all;
@@ -287,24 +304,32 @@ class ScannerService {
           const rawCandles = await fetchKlines(symbol, timeframe, 60);
           if (!rawCandles || rawCandles.length < 15) continue;
 
-          // Process only closed candles (last candle is fluctuating)
+          // Closed candles strictly - last candle is active
           const closedCandles = rawCandles.slice(0, rawCandles.length - 1);
           const currentPrice = rawCandles[rawCandles.length - 1].close;
 
           const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
-          if (analysis.signal) {
-            // Check if we already have this signal
-            const existing = this.performanceSignals.get(analysis.signal.id);
-            if (!existing) {
-              this.performanceSignals.set(analysis.signal.id, analysis.signal);
-            }
+
+          // Register generated signals across models
+          if (analysis.originalSignal) {
+            this.registerSignalSafely(analysis.originalSignal);
           }
+          if (analysis.inverseSignal) {
+            this.registerSignalSafely(analysis.inverseSignal);
+          }
+          if (analysis.aiFilteredSignal) {
+            this.registerSignalSafely(analysis.aiFilteredSignal);
+          }
+          if (analysis.aiFilteredInverseSignal) {
+            this.registerSignalSafely(analysis.aiFilteredInverseSignal);
+          }
+
           if (analysis.pendingRetest) {
             pendingSetups.push(analysis.pendingRetest);
           }
           processed++;
         } catch (err) {
-          // continue
+          // continue next symbol
         }
       }
 
@@ -313,7 +338,6 @@ class ScannerService {
       this.lastScanTime = Date.now();
       this.status = 'ready';
 
-      // Update signal list and watch immediately
       this.syncActiveSignalsArray();
       this.watchActiveSignals();
     } catch (err) {
@@ -324,10 +348,17 @@ class ScannerService {
     }
   }
 
+  registerSignalSafely(signal) {
+    if (!signal || !signal.id) return;
+    const existing = this.performanceSignals.get(signal.id);
+    if (!existing) {
+      this.performanceSignals.set(signal.id, signal);
+    }
+  }
+
   /**
    * Scans specifically the asset selected on the active chart.
-   * Does NOT scan a random asset.
-   * Does NOT switch the selected asset.
+   * Does NOT scan a random asset. Does NOT switch the selected asset.
    * Uses real closed candles and live market data.
    */
   async scanSingleAsset(symbol, timeframe = '15m') {
@@ -348,11 +379,15 @@ class ScannerService {
       const currentPrice = rawCandles[rawCandles.length - 1].close;
 
       const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
-      if (analysis.signal) {
-        this.performanceSignals.set(analysis.signal.id, analysis.signal);
-        this.syncActiveSignalsArray();
-        this.watchActiveSignals();
-      }
+
+      if (analysis.originalSignal) this.registerSignalSafely(analysis.originalSignal);
+      if (analysis.inverseSignal) this.registerSignalSafely(analysis.inverseSignal);
+      if (analysis.aiFilteredSignal) this.registerSignalSafely(analysis.aiFilteredSignal);
+      if (analysis.aiFilteredInverseSignal) this.registerSignalSafely(analysis.aiFilteredInverseSignal);
+
+      this.syncActiveSignalsArray();
+      this.watchActiveSignals();
+
       if (analysis.pendingRetest) {
         this.pendingRetests = [
           analysis.pendingRetest,
@@ -364,7 +399,12 @@ class ScannerService {
         asset: symbol,
         timeframe,
         currentPrice,
-        signal: analysis.signal,
+        regimeData: analysis.regimeData,
+        signal: analysis.aiFilteredSignal || analysis.originalSignal,
+        originalSignal: analysis.originalSignal,
+        inverseSignal: analysis.inverseSignal,
+        aiFilteredSignal: analysis.aiFilteredSignal,
+        aiFilteredInverseSignal: analysis.aiFilteredInverseSignal,
         pendingRetest: analysis.pendingRetest,
         scannedAt: Date.now()
       };
@@ -380,13 +420,20 @@ class ScannerService {
     }
   }
 
+  /**
+   * Evaluates candles, detects market regime, applies NWWT setup rules,
+   * runs AI structure validation, and generates 4 research model representations.
+   */
   analyzeCandles(symbol, timeframe, closedCandles, currentPrice) {
     const len = closedCandles.length;
-    if (len < 10) return { signal: null, pendingRetest: null };
+    if (len < 10) return { originalSignal: null, pendingRetest: null };
 
     const c0 = closedCandles[len - 1]; // Most recently closed candle
     const c1 = closedCandles[len - 2];
     const c2 = closedCandles[len - 3];
+
+    // Detect Market Regime from closed candle series
+    const regimeData = detectMarketRegime(closedCandles);
 
     // Volume comparison
     const volLookback = Math.min(20, len);
@@ -397,7 +444,7 @@ class ScannerService {
     const avgVol = volSum / volLookback || 1;
     const isVolExpanding = (c0.volume || 0) > avgVol * 1.15;
 
-    // 1. Identify Fractal Swing Highs and Lows (2-bar pivot)
+    // Identify Fractal Swing Highs and Lows (2-bar pivot)
     const swingHighs = [];
     const swingLows = [];
 
@@ -424,18 +471,17 @@ class ScannerService {
     const c0LowerWick = Math.min(c0.open, c0.close) - c0.low;
     const c0Body = Math.abs(c0.close - c0.open);
     const c0IsGreen = c0.close >= c0.open;
-    const c1IsGreen = c1.close >= c1.open;
 
     const isDecisiveBody = c0Body / c0Range > 0.48;
 
-    let signal = null;
+    let baseSignal = null;
     let pendingRetest = null;
 
     // =========================================================================
     // TIER 1: BREAK & RETEST (Reinforced Setup)
     // =========================================================================
     if (c1.close > lastHigh && c0.low <= lastHigh && c0.close > lastHigh && c0IsGreen) {
-      signal = this.createSignalItem({
+      baseSignal = this.createSignalItem({
         symbol,
         timeframe,
         direction: 'UP',
@@ -444,10 +490,12 @@ class ScannerService {
         invalidationLevel: Math.min(c0.low, lastHigh * 0.994),
         confidence: 96,
         reason: `Break & Retest Confirmed: Previous resistance ($${lastHigh.toFixed(2)}) defended as new support with lower wick rejection and green continuation close.`,
-        timestamp: c0.closeTime
+        timestamp: c0.closeTime,
+        modelType: 'original',
+        marketRegime: regimeData.regime
       });
     } else if (c1.close < lastLow && c0.high >= lastLow && c0.close < lastLow && !c0IsGreen) {
-      signal = this.createSignalItem({
+      baseSignal = this.createSignalItem({
         symbol,
         timeframe,
         direction: 'DOWN',
@@ -456,14 +504,16 @@ class ScannerService {
         invalidationLevel: Math.max(c0.high, lastLow * 1.006),
         confidence: 96,
         reason: `Break & Retest Confirmed: Previous support ($${lastLow.toFixed(2)}) rejected as new resistance with upper wick rejection and red continuation close.`,
-        timestamp: c0.closeTime
+        timestamp: c0.closeTime,
+        modelType: 'original',
+        marketRegime: regimeData.regime
       });
     }
 
     // =========================================================================
     // TIER 2: STRONG CONFIRMED BREAK (BOS) - RETEST OPTIONAL
     // =========================================================================
-    if (!signal) {
+    if (!baseSignal) {
       const isStrongBullishBreak =
         c0.close > lastHigh &&
         (c1.close <= lastHigh || c2.close <= lastHigh) &&
@@ -477,7 +527,7 @@ class ScannerService {
         isDecisiveBody;
 
       if (isStrongBullishBreak) {
-        signal = this.createSignalItem({
+        baseSignal = this.createSignalItem({
           symbol,
           timeframe,
           direction: 'UP',
@@ -486,10 +536,12 @@ class ScannerService {
           invalidationLevel: Math.max(lastHigh * 0.993, c0.low),
           confidence: isVolExpanding ? 93 : 90,
           reason: `Strong Confirmed Break: Candle closed firmly above swing resistance $${lastHigh.toFixed(2)} with decisive bullish momentum${isVolExpanding ? ' and expanding volume' : ''}. Retest not required.`,
-          timestamp: c0.closeTime
+          timestamp: c0.closeTime,
+          modelType: 'original',
+          marketRegime: regimeData.regime
         });
       } else if (isStrongBearishBreak) {
-        signal = this.createSignalItem({
+        baseSignal = this.createSignalItem({
           symbol,
           timeframe,
           direction: 'DOWN',
@@ -498,7 +550,9 @@ class ScannerService {
           invalidationLevel: Math.min(lastLow * 1.007, c0.high),
           confidence: isVolExpanding ? 93 : 90,
           reason: `Strong Confirmed Breakdown: Candle closed firmly below swing support $${lastLow.toFixed(2)} with decisive bearish momentum${isVolExpanding ? ' and expanding volume' : ''}. Retest not required.`,
-          timestamp: c0.closeTime
+          timestamp: c0.closeTime,
+          modelType: 'original',
+          marketRegime: regimeData.regime
         });
       }
     }
@@ -506,9 +560,9 @@ class ScannerService {
     // =========================================================================
     // TIER 3: FAKEOUT REJECTION
     // =========================================================================
-    if (!signal) {
+    if (!baseSignal) {
       if (c0.high > lastHigh && c0.close < lastHigh && (c0UpperWick / c0Range) > 0.45 && !c0IsGreen) {
-        signal = this.createSignalItem({
+        baseSignal = this.createSignalItem({
           symbol,
           timeframe,
           direction: 'DOWN',
@@ -517,10 +571,12 @@ class ScannerService {
           invalidationLevel: c0.high,
           confidence: 89,
           reason: `Fakeout Rejection: Liquidity sweep above resistance $${lastHigh.toFixed(2)} met with aggressive seller absorption and heavy upper wick rejection.`,
-          timestamp: c0.closeTime
+          timestamp: c0.closeTime,
+          modelType: 'original',
+          marketRegime: regimeData.regime
         });
       } else if (c0.low < lastLow && c0.close > lastLow && (c0LowerWick / c0Range) > 0.45 && c0IsGreen) {
-        signal = this.createSignalItem({
+        baseSignal = this.createSignalItem({
           symbol,
           timeframe,
           direction: 'UP',
@@ -529,7 +585,9 @@ class ScannerService {
           invalidationLevel: c0.low,
           confidence: 89,
           reason: `Fakeout Rejection: Liquidity sweep below support $${lastLow.toFixed(2)} met with aggressive buyer absorption and strong lower wick defense.`,
-          timestamp: c0.closeTime
+          timestamp: c0.closeTime,
+          modelType: 'original',
+          marketRegime: regimeData.regime
         });
       }
     }
@@ -537,12 +595,12 @@ class ScannerService {
     // =========================================================================
     // TIER 4: ENGULFING CONFIRMATION
     // =========================================================================
-    if (!signal) {
-      const isBullishEngulfing = c0IsGreen && !c1IsGreen && c0.close > c1.open && c0.open <= c1.close;
-      const isBearishEngulfing = !c0IsGreen && c1IsGreen && c0.close < c1.open && c0.open >= c1.close;
+    if (!baseSignal) {
+      const isBullishEngulfing = c0IsGreen && !c1.isGreen && c0.close > c1.open && c0.open <= c1.close;
+      const isBearishEngulfing = !c0IsGreen && c1.isGreen && c0.close < c1.open && c0.open >= c1.close;
 
       if (isBullishEngulfing && Math.abs(c0.low - lastLow) / lastLow < 0.018) {
-        signal = this.createSignalItem({
+        baseSignal = this.createSignalItem({
           symbol,
           timeframe,
           direction: 'UP',
@@ -551,10 +609,12 @@ class ScannerService {
           invalidationLevel: c0.low,
           confidence: 86,
           reason: `Bullish Engulfing Confirmation: Closed at key structural support zone $${lastLow.toFixed(2)} engulfing previous candle body.`,
-          timestamp: c0.closeTime
+          timestamp: c0.closeTime,
+          modelType: 'original',
+          marketRegime: regimeData.regime
         });
       } else if (isBearishEngulfing && Math.abs(c0.high - lastHigh) / lastHigh < 0.018) {
-        signal = this.createSignalItem({
+        baseSignal = this.createSignalItem({
           symbol,
           timeframe,
           direction: 'DOWN',
@@ -563,7 +623,9 @@ class ScannerService {
           invalidationLevel: c0.high,
           confidence: 86,
           reason: `Bearish Engulfing Confirmation: Closed at key structural resistance zone $${lastHigh.toFixed(2)} engulfing previous candle body.`,
-          timestamp: c0.closeTime
+          timestamp: c0.closeTime,
+          modelType: 'original',
+          marketRegime: regimeData.regime
         });
       }
     }
@@ -594,94 +656,247 @@ class ScannerService {
       };
     }
 
-    return { signal, pendingRetest };
+    let originalSignal = null;
+    let inverseSignal = null;
+    let aiFilteredSignal = null;
+    let aiFilteredInverseSignal = null;
+
+    if (baseSignal) {
+      // Run AI Market Structure Intelligence on original signal
+      const aiValidation = validateSetupWithStructureIntelligence(
+        baseSignal,
+        closedCandles,
+        regimeData,
+        this.computeSingleModelStats('original')
+      );
+
+      originalSignal = {
+        ...baseSignal,
+        marketRegime: regimeData.regime,
+        aiValidation,
+        modelType: 'original',
+        signalConditions: aiValidation.conditions
+      };
+
+      // Create Inverse Signal representation
+      const rawInverse = createInverseSignal(originalSignal);
+      const inverseAiValidation = validateSetupWithStructureIntelligence(
+        rawInverse,
+        closedCandles,
+        regimeData,
+        this.computeSingleModelStats('inverse')
+      );
+      inverseSignal = {
+        ...rawInverse,
+        marketRegime: regimeData.regime,
+        aiValidation: inverseAiValidation,
+        modelType: 'inverse',
+        signalConditions: inverseAiValidation.conditions
+      };
+
+      // Filtered Models: Only allowed when aiValidation.status === 'allow'
+      if (aiValidation.status === 'allow') {
+        aiFilteredSignal = {
+          ...originalSignal,
+          id: `${originalSignal.id}-aifiltered`,
+          modelType: 'ai_filtered',
+          confidence: Math.max(originalSignal.confidence, aiValidation.confidence)
+        };
+      }
+
+      if (inverseAiValidation.status === 'allow') {
+        aiFilteredInverseSignal = {
+          ...inverseSignal,
+          id: `${inverseSignal.id}-aifiltered`,
+          modelType: 'ai_filtered_inverse',
+          confidence: Math.max(inverseSignal.confidence, inverseAiValidation.confidence)
+        };
+      }
+    }
+
+    return {
+      originalSignal,
+      inverseSignal,
+      aiFilteredSignal,
+      aiFilteredInverseSignal,
+      regimeData,
+      pendingRetest
+    };
   }
 
   /**
-   * Computes comprehensive performance stats by setup, timeframe, asset, and direction
+   * Helper to compute single model statistics for adaptive feedback
+   */
+  computeSingleModelStats(modelType) {
+    const signals = Array.from(this.performanceSignals.values()).filter(
+      (s) => (s.modelType || 'original') === modelType
+    );
+    const bySetupType = {};
+    for (const s of signals) {
+      if (!bySetupType[s.setupType]) {
+        bySetupType[s.setupType] = { wins: 0, losses: 0, total: 0 };
+      }
+      const st = bySetupType[s.setupType];
+      st.total++;
+      if (s.status === 'WIN') st.wins++;
+      else if (s.status === 'LOSS') st.losses++;
+    }
+    return { bySetupType };
+  }
+
+  /**
+   * Computes comprehensive performance stats across all 4 research models:
+   * 1. original
+   * 2. inverse
+   * 3. ai_filtered
+   * 4. ai_filtered_inverse
+   * Plus walk-forward validation and breakdowns.
    */
   computePerformanceStats() {
-    const signals = Array.from(this.performanceSignals.values());
+    const allSignals = Array.from(this.performanceSignals.values());
 
-    let activeCount = 0;
-    let winsCount = 0;
-    let lossesCount = 0;
-    let expiredCount = 0;
+    const computeForList = (signals) => {
+      let activeCount = 0;
+      let winsCount = 0;
+      let lossesCount = 0;
+      let expiredCount = 0;
+      let winPnlSum = 0;
+      let lossPnlSum = 0;
+      let maxLosingStreak = 0;
+      let currentStreak = 0;
 
-    let winPnlSum = 0;
-    let lossPnlSum = 0;
+      const bySetupType = {};
+      const byTimeframe = {};
+      const byDirection = {
+        UP: { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0, _pnlSum: 0 },
+        DOWN: { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0, _pnlSum: 0 }
+      };
+      const byAsset = {};
+      const byRegime = {};
 
-    const bySetupType = {};
-    const byTimeframe = {};
-    const byDirection = {
-      UP: { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0 },
-      DOWN: { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0 }
+      function updateGroup(group, key, status, pnl = 0) {
+        if (!key) return;
+        if (!group[key]) {
+          group[key] = { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0, _pnlSum: 0 };
+        }
+        const item = group[key];
+        item.total++;
+        if (status === 'ACTIVE') item.active++;
+        else if (status === 'WIN') {
+          item.wins++;
+          item._pnlSum += pnl;
+        } else if (status === 'LOSS') {
+          item.losses++;
+          item._pnlSum += pnl;
+        } else if (status === 'EXPIRED') {
+          item.expired++;
+        }
+        const settled = item.wins + item.losses;
+        item.tpRate = settled > 0 ? parseFloat(((item.wins / settled) * 100).toFixed(1)) : 0;
+        item.avgPnlPercent = settled > 0 ? parseFloat((item._pnlSum / settled).toFixed(2)) : 0;
+      }
+
+      // Chronological walk for streak and drawdown
+      const sorted = [...signals].sort((a, b) => a.timestamp - b.timestamp);
+      let peak = 0;
+      let equity = 0;
+      let maxDrawdown = 0;
+
+      for (const s of sorted) {
+        const pnl = s.pnlPercent || 0;
+        if (s.status === 'ACTIVE') activeCount++;
+        else if (s.status === 'WIN') {
+          winsCount++;
+          winPnlSum += pnl;
+          equity += pnl;
+          currentStreak = 0;
+        } else if (s.status === 'LOSS') {
+          lossesCount++;
+          lossPnlSum += Math.abs(pnl);
+          equity += pnl;
+          currentStreak++;
+          if (currentStreak > maxLosingStreak) maxLosingStreak = currentStreak;
+        } else if (s.status === 'EXPIRED') {
+          expiredCount++;
+        }
+
+        if (equity > peak) peak = equity;
+        const dd = peak - equity;
+        if (dd > maxDrawdown) maxDrawdown = dd;
+
+        updateGroup(bySetupType, s.setupType, s.status, pnl);
+        updateGroup(byTimeframe, s.timeframe, s.status, pnl);
+        if (s.direction === 'UP' || s.direction === 'DOWN') {
+          updateGroup(byDirection, s.direction, s.status, pnl);
+        }
+        updateGroup(byAsset, s.asset, s.status, pnl);
+        if (s.marketRegime) {
+          updateGroup(byRegime, s.marketRegime, s.status, pnl);
+        }
+      }
+
+      const settledTotal = winsCount + lossesCount;
+      const tpRate = settledTotal > 0 ? parseFloat(((winsCount / settledTotal) * 100).toFixed(1)) : 0;
+      const avgWinPercent = winsCount > 0 ? parseFloat((winPnlSum / winsCount).toFixed(2)) : 0;
+      const avgLossPercent = lossesCount > 0 ? parseFloat((lossPnlSum / lossesCount).toFixed(2)) : 0;
+      const profitFactor = lossPnlSum > 0 ? parseFloat((winPnlSum / lossPnlSum).toFixed(2)) : winsCount > 0 ? 9.99 : 0;
+
+      const winRateFrac = settledTotal > 0 ? winsCount / settledTotal : 0;
+      const lossRateFrac = settledTotal > 0 ? lossesCount / settledTotal : 0;
+      const expectancy = parseFloat((winRateFrac * avgWinPercent - lossRateFrac * avgLossPercent).toFixed(2));
+
+      return {
+        totalSignals: signals.length,
+        activeCount,
+        completedCount: settledTotal + expiredCount,
+        winsCount,
+        lossesCount,
+        expiredCount,
+        tpRate,
+        avgWinPercent,
+        avgLossPercent,
+        profitFactor,
+        expectancy,
+        maxLosingStreak,
+        drawdown: parseFloat(maxDrawdown.toFixed(2)),
+        sampleSize: settledTotal,
+        hasSufficientSample: settledTotal >= 10,
+        bySetupType,
+        byTimeframe,
+        byDirection,
+        byAsset,
+        byRegime
+      };
     };
-    const byAsset = {};
 
-    function updateGroup(group, key, status, pnl = 0) {
-      if (!group[key]) {
-        group[key] = { total: 0, wins: 0, losses: 0, expired: 0, active: 0, tpRate: 0, avgPnlPercent: 0, _pnlSum: 0 };
-      }
-      const item = group[key];
-      item.total++;
-      if (status === 'ACTIVE') item.active++;
-      else if (status === 'WIN') {
-        item.wins++;
-        item._pnlSum += pnl;
-      } else if (status === 'LOSS') {
-        item.losses++;
-        item._pnlSum += pnl;
-      } else if (status === 'EXPIRED') {
-        item.expired++;
-      }
-      const settled = item.wins + item.losses;
-      item.tpRate = settled > 0 ? parseFloat(((item.wins / settled) * 100).toFixed(1)) : 0;
-      item.avgPnlPercent = settled > 0 ? parseFloat((item._pnlSum / settled).toFixed(2)) : 0;
-    }
+    // Filter signals by model
+    const originalSignals = allSignals.filter((s) => (s.modelType || 'original') === 'original');
+    const inverseSignals = allSignals.filter((s) => s.modelType === 'inverse');
+    const aiFilteredSignals = allSignals.filter((s) => s.modelType === 'ai_filtered');
+    const aiFilteredInverseSignals = allSignals.filter((s) => s.modelType === 'ai_filtered_inverse');
 
-    for (const s of signals) {
-      const pnl = s.pnlPercent || 0;
-      if (s.status === 'ACTIVE') activeCount++;
-      else if (s.status === 'WIN') {
-        winsCount++;
-        winPnlSum += pnl;
-      } else if (s.status === 'LOSS') {
-        lossesCount++;
-        lossPnlSum += Math.abs(pnl);
-      } else if (s.status === 'EXPIRED') {
-        expiredCount++;
-      }
+    const originalStats = computeForList(originalSignals);
+    const inverseStats = computeForList(inverseSignals);
+    const aiFilteredStats = computeForList(aiFilteredSignals);
+    const aiFilteredInverseStats = computeForList(aiFilteredInverseSignals);
 
-      updateGroup(bySetupType, s.setupType, s.status, pnl);
-      updateGroup(byTimeframe, s.timeframe, s.status, pnl);
-      if (s.direction === 'UP' || s.direction === 'DOWN') {
-        updateGroup(byDirection, s.direction, s.status, pnl);
-      }
-      updateGroup(byAsset, s.asset, s.status, pnl);
-    }
-
-    const settledTotal = winsCount + lossesCount;
-    const tpRate = settledTotal > 0 ? parseFloat(((winsCount / settledTotal) * 100).toFixed(1)) : 0;
-    const avgWinPercent = winsCount > 0 ? parseFloat((winPnlSum / winsCount).toFixed(2)) : 0;
-    const avgLossPercent = lossesCount > 0 ? parseFloat((lossPnlSum / lossesCount).toFixed(2)) : 0;
-    const profitFactor = lossPnlSum > 0 ? parseFloat((winPnlSum / lossPnlSum).toFixed(2)) : winsCount > 0 ? 9.99 : 0;
+    // Completed trades for walk-forward validation (AI Filtered or Original)
+    const completedForWalkForward = allSignals.filter(
+      (s) => s.status === 'WIN' || s.status === 'LOSS'
+    );
+    const walkForward = calculateWalkForwardValidation(completedForWalkForward);
 
     return {
-      totalSignals: signals.length,
-      activeCount,
-      completedCount: settledTotal + expiredCount,
-      winsCount,
-      lossesCount,
-      expiredCount,
-      tpRate,
-      avgWinPercent,
-      avgLossPercent,
-      profitFactor,
-      bySetupType,
-      byTimeframe,
-      byDirection,
-      byAsset
+      // Top-level stats (defaults to original for backward compatibility)
+      ...originalStats,
+      // 4-Model Comparison Suite
+      byModel: {
+        original: originalStats,
+        inverse: inverseStats,
+        ai_filtered: aiFilteredStats,
+        ai_filtered_inverse: aiFilteredInverseStats
+      },
+      walkForward
     };
   }
 
