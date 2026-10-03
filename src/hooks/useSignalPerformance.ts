@@ -43,6 +43,15 @@ export function useSignalPerformance(
     });
   }, [incomingSignals]);
 
+  // Synchronize when a signal is settled on chart
+  useEffect(() => {
+    const handleSettled = () => {
+      setSignals(loadStoredSignals());
+    };
+    window.addEventListener('nwwt_signal_settled', handleSettled);
+    return () => window.removeEventListener('nwwt_signal_settled', handleSettled);
+  }, []);
+
   // 3. Monitor active signals using live market ticks
   // Throttle evaluation to avoid unnecessary renders on rapid ticks
   const lastEvalTimeRef = useRef<number>(0);
@@ -64,10 +73,7 @@ export function useSignalPerformance(
       if (!ticker || ticker.lastPrice === '--') continue;
 
       const lastPrice = parseFloat(ticker.lastPrice);
-      const highPrice = ticker.highPrice !== '--' ? parseFloat(ticker.highPrice) : undefined;
-      const lowPrice = ticker.lowPrice !== '--' ? parseFloat(ticker.lowPrice) : undefined;
-
-      const res = evaluateSignalsWithTicker(currentSignals, active.asset, lastPrice, highPrice, lowPrice);
+      const res = evaluateSignalsWithTicker(currentSignals, active.asset, lastPrice);
       if (res.changed) {
         currentSignals = res.updatedSignals;
         anyChanged = true;

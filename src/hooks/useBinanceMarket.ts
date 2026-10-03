@@ -1,11 +1,12 @@
 /**
  * Custom React Hook for Real-Time Binance Market Streaming & NWWT Scanner
+ * Reuses the project's existing Binance WebSocket connection via /ws
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { TickerData, ConnectionStatus, ConnectionPoolStats, ScannerState, Timeframe } from '../types.ts';
 
-export function useWeexMarket() {
+export function useBinanceMarket() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
   const [poolStats, setPoolStats] = useState<ConnectionPoolStats | null>(null);
   const [totalSymbols, setTotalSymbols] = useState<number>(0);
@@ -53,7 +54,7 @@ export function useWeexMarket() {
     return () => clearInterval(secInterval);
   }, []);
 
-  // Process a single ticker update item
+  // Process a single ticker update item from Binance feed
   const processTickerItem = useCallback((t: Partial<TickerData> & { symbol: string }) => {
     if (!t || !t.symbol) return;
     tickCounterRef.current++;
@@ -128,7 +129,6 @@ export function useWeexMarket() {
             if (Array.isArray(data.tickers)) {
               for (const t of data.tickers) {
                 const existing = tickersMapRef.current.get(t.symbol);
-                // Keep fresh price if existing
                 tickersMapRef.current.set(t.symbol, {
                   ...(existing || {}),
                   ...t
@@ -138,7 +138,6 @@ export function useWeexMarket() {
               flushUpdates();
             }
           } else if (msg.type === 'ticker_batch') {
-            // Batch of ticker updates from server
             if (Array.isArray(msg.data)) {
               for (const item of msg.data) {
                 processTickerItem(item);
@@ -183,8 +182,7 @@ export function useWeexMarket() {
   useEffect(() => {
     connect();
 
-    // Tab visibility recovery: if the user returned from another tab,
-    // request fresh market snapshot
+    // Tab visibility recovery: if the user returned from another tab, request fresh market snapshot
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
         const ws = socketRef.current;
@@ -221,7 +219,6 @@ export function useWeexMarket() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'run_scan', timeframe }));
     }
-    // Also trigger via REST fetch fallback
     fetch(`/api/scanner`)
       .then((res) => res.json())
       .then((data) => {

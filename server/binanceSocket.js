@@ -239,5 +239,4 @@ class BinanceSocketManager {
 }
 
 export const binanceSocket = new BinanceSocketManager();
-export const weexSocket = binanceSocket; // Backward compatibility alias
 export default binanceSocket;

@@ -64,10 +64,10 @@ export const DrawingAlertModal: React.FC<DrawingAlertModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 select-none animate-in fade-in duration-150">
-      <div className="w-full max-w-md rounded-lg bg-[#0e1017] border border-[#26293a] shadow-2xl text-white font-mono flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-2 sm:p-4 select-none animate-in fade-in duration-150">
+      <div className="w-full max-w-md rounded-lg bg-[#0e1017] border border-[#26293a] shadow-2xl text-white font-mono flex flex-col max-h-[90vh] overflow-hidden">
         {/* Header */}
-        <div className="px-4 py-3 bg-[#12141f] border-b border-[#202333] flex items-center justify-between">
+        <div className="px-3.5 py-2.5 sm:px-4 sm:py-3 bg-[#12141f] border-b border-[#202333] flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
               <Bell className="w-3.5 h-3.5" />
@@ -87,7 +87,7 @@ export const DrawingAlertModal: React.FC<DrawingAlertModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={handleCreateAlert} className="p-4 space-y-3.5 overflow-y-auto max-h-[80vh]">
+        <form onSubmit={handleCreateAlert} className="p-3 sm:p-4 space-y-3 overflow-y-auto max-h-[calc(90vh-65px)] overscroll-contain">
           {/* 1. Alert Trigger Type */}
           <div>
             <label className="text-[11px] font-bold text-slate-300 block mb-1.5 uppercase">

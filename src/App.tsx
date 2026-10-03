@@ -14,7 +14,7 @@
  */
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { useWeexMarket } from './hooks/useWeexMarket.ts';
+import { useBinanceMarket } from './hooks/useBinanceMarket.ts';
 import { useSignalPerformance } from './hooks/useSignalPerformance.ts';
 import { Header, NavTab } from './components/Header.tsx';
 import { WatchlistToolbar } from './components/WatchlistToolbar.tsx';
@@ -34,7 +34,7 @@ export default function App() {
     scannerState,
     triggerScan,
     reconnectBackend
-  } = useWeexMarket();
+  } = useBinanceMarket();
 
   // V8 Signal Performance Engine
   const {

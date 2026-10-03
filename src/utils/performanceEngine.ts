@@ -13,7 +13,8 @@
  * - Strict non-adaptive rule: Preserves technical rules without automated strategy perturbation
  */
 
-import { ScannerSignalItem, SignalPerformanceStats, SetupPerformance, Timeframe } from '../types.ts';
+import { ScannerSignalItem, SignalPerformanceStats, SetupPerformance, Timeframe, Candle } from '../types.ts';
+import { checkSignalTouch, addClearedSignalId } from './signalTouchEngine.ts';
 
 const STORAGE_KEY = 'nwwt_v8_signal_performance';
 
@@ -80,7 +81,8 @@ export function evaluateSignalsWithTicker(
   symbol: string,
   lastPriceNum: number,
   highPriceNum?: number,
-  lowPriceNum?: number
+  lowPriceNum?: number,
+  candles?: Candle[]
 ): { updatedSignals: ScannerSignalItem[]; changed: boolean } {
   if (isNaN(lastPriceNum) || lastPriceNum <= 0) {
     return { updatedSignals: signals, changed: false };
@@ -98,129 +100,48 @@ export function evaluateSignalsWithTicker(
     const highest = Math.max(s.highestReached || currentPrice, currentPrice);
     const lowest = Math.min(s.lowestReached || currentPrice, currentPrice);
 
-    const isUp = s.direction === 'UP';
+    // 1. Evaluate touch on TP or SL using the accurate touch engine
+    const touch = checkSignalTouch(s, currentPrice, candles);
 
-    if (isUp) {
-      const tpReached = currentPrice >= s.takeProfit;
-      const slReached = currentPrice <= s.stopLoss;
+    if (touch.isTouched && touch.touchedLevel) {
+      changed = true;
+      addClearedSignalId(s.id); // Permanently remove both TP and SL lines
 
-      // CONSERVATIVE RULE: If both TP and SL touched in same period, use conservative SL result
-      if (tpReached && slReached) {
-        changed = true;
-        return {
-          ...s,
-          status: 'LOSS' as const,
-          statusReason: 'Conservative SL: Both TP and SL were touched in the same period.',
-          completedAt: now,
-          exitPrice: s.stopLoss,
-          pnlPercent: -Math.abs(((s.entryPrice - s.stopLoss) / s.entryPrice) * 100),
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
+      const isWin = touch.touchedLevel === 'TP';
+      const exitPrice = touch.touchPrice;
+      const isUp = s.direction === 'UP';
+      const pnlRaw = isUp
+        ? ((exitPrice - s.entryPrice) / s.entryPrice) * 100
+        : ((s.entryPrice - exitPrice) / s.entryPrice) * 100;
 
-      if (tpReached) {
-        changed = true;
-        return {
-          ...s,
-          status: 'WIN' as const,
-          statusReason: `Take profit reached at $${s.takeProfit.toFixed(4)}.`,
-          completedAt: now,
-          exitPrice: s.takeProfit,
-          pnlPercent: Math.abs(((s.takeProfit - s.entryPrice) / s.entryPrice) * 100),
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
+      return {
+        ...s,
+        status: isWin ? ('WIN' as const) : ('LOSS' as const),
+        statusReason: touch.reason,
+        completedAt: touch.touchTimestamp || now,
+        exitPrice,
+        pnlPercent: isWin ? Math.abs(pnlRaw) : -Math.abs(pnlRaw),
+        highestReached: highest,
+        lowestReached: lowest
+      };
+    }
 
-      if (slReached) {
-        changed = true;
-        return {
-          ...s,
-          status: 'LOSS' as const,
-          statusReason: `Stop loss touched at $${s.stopLoss.toFixed(4)}.`,
-          completedAt: now,
-          exitPrice: s.stopLoss,
-          pnlPercent: -Math.abs(((s.entryPrice - s.stopLoss) / s.entryPrice) * 100),
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
-
-      if (now >= s.expiryTimestamp) {
-        changed = true;
-        return {
-          ...s,
-          status: 'EXPIRED' as const,
-          statusReason: `Expired after ${s.expiryCandles} candle periods without reaching TP or SL.`,
-          completedAt: now,
-          exitPrice: currentPrice,
-          pnlPercent: ((currentPrice - s.entryPrice) / s.entryPrice) * 100,
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
-    } else {
-      // DOWN DIRECTION
-      const tpReached = currentPrice <= s.takeProfit;
-      const slReached = currentPrice >= s.stopLoss;
-
-      // CONSERVATIVE RULE: If both touched, record as LOSS
-      if (tpReached && slReached) {
-        changed = true;
-        return {
-          ...s,
-          status: 'LOSS' as const,
-          statusReason: 'Conservative SL: Both TP and SL were touched in the same period.',
-          completedAt: now,
-          exitPrice: s.stopLoss,
-          pnlPercent: -Math.abs(((s.stopLoss - s.entryPrice) / s.entryPrice) * 100),
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
-
-      if (tpReached) {
-        changed = true;
-        return {
-          ...s,
-          status: 'WIN' as const,
-          statusReason: `Take profit reached at $${s.takeProfit.toFixed(4)}.`,
-          completedAt: now,
-          exitPrice: s.takeProfit,
-          pnlPercent: Math.abs(((s.entryPrice - s.takeProfit) / s.entryPrice) * 100),
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
-
-      if (slReached) {
-        changed = true;
-        return {
-          ...s,
-          status: 'LOSS' as const,
-          statusReason: `Stop loss touched at $${s.stopLoss.toFixed(4)}.`,
-          completedAt: now,
-          exitPrice: s.stopLoss,
-          pnlPercent: -Math.abs(((s.stopLoss - s.entryPrice) / s.entryPrice) * 100),
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
-
-      if (now >= s.expiryTimestamp) {
-        changed = true;
-        return {
-          ...s,
-          status: 'EXPIRED' as const,
-          statusReason: `Expired after ${s.expiryCandles} candle periods without reaching TP or SL.`,
-          completedAt: now,
-          exitPrice: currentPrice,
-          pnlPercent: ((s.entryPrice - currentPrice) / s.entryPrice) * 100,
-          highestReached: highest,
-          lowestReached: lowest
-        };
-      }
+    // 2. Check Expiry
+    if (now >= s.expiryTimestamp) {
+      changed = true;
+      addClearedSignalId(s.id); // Remove lines upon expiry
+      return {
+        ...s,
+        status: 'EXPIRED' as const,
+        statusReason: `Expired after ${s.expiryCandles} candle periods without reaching TP or SL.`,
+        completedAt: now,
+        exitPrice: currentPrice,
+        pnlPercent: s.direction === 'UP'
+          ? ((currentPrice - s.entryPrice) / s.entryPrice) * 100
+          : ((s.entryPrice - currentPrice) / s.entryPrice) * 100,
+        highestReached: highest,
+        lowestReached: lowest
+      };
     }
 
     if (highest !== s.highestReached || lowest !== s.lowestReached) {
@@ -232,6 +153,55 @@ export function evaluateSignalsWithTicker(
   });
 
   return { updatedSignals, changed };
+}
+
+/**
+ * Manually or programmatically settles an individual signal outcome,
+ * permanently removing its TP and SL lines from all charts.
+ */
+export function settleSignalOutcome(
+  signalId: string,
+  outcome: 'WIN' | 'LOSS' | 'EXPIRED',
+  exitPrice: number,
+  reason: string
+): void {
+  try {
+    const signals = loadStoredSignals();
+    let changed = false;
+    const now = Date.now();
+
+    const updated = signals.map((s) => {
+      if (s.id === signalId && s.status === 'ACTIVE') {
+        changed = true;
+        const isWin = outcome === 'WIN';
+        const pnl = s.direction === 'UP'
+          ? ((exitPrice - s.entryPrice) / s.entryPrice) * 100
+          : ((s.entryPrice - exitPrice) / s.entryPrice) * 100;
+
+        return {
+          ...s,
+          status: outcome,
+          statusReason: reason,
+          completedAt: now,
+          exitPrice,
+          pnlPercent: isWin ? Math.abs(pnl) : -Math.abs(pnl),
+          highestReached: Math.max(s.highestReached || exitPrice, exitPrice),
+          lowestReached: Math.min(s.lowestReached || exitPrice, exitPrice)
+        };
+      }
+      return s;
+    });
+
+    if (changed) {
+      saveStoredSignals(updated);
+      addClearedSignalId(signalId);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('nwwt_signal_settled', { detail: { signalId, outcome } }));
+      }
+    }
+  } catch (err) {
+    console.warn('[PerformanceEngine] Error settling signal outcome:', err);
+  }
 }
 
 /**

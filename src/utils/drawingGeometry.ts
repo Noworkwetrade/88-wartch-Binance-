@@ -615,7 +615,130 @@ export function hitTestDrawing(
 }
 
 /**
- * Calculates the exact price level of a drawing at a specific timestamp
+ * Candle Wick Snapping Data Model
+ */
+export interface CandleSnapPoint {
+  time: number;
+  price: number;
+  snapType: 'high' | 'low' | 'open' | 'close';
+  candle: Candle;
+  canvasX: number;
+  canvasY: number;
+}
+
+/**
+ * Accurately finds the nearest candle level (wick high, wick low, open, close)
+ * based on pointer coordinates and genuine OHLC candle data.
+ */
+export function findCandleSnap(
+  x: number,
+  y: number,
+  ctx: CoordinateContext,
+  thresholdX = 26,
+  thresholdY = 32
+): CandleSnapPoint | null {
+  const { candles, candleWidth, panOffset, chartWidth } = ctx;
+  if (!candles || candles.length === 0) return null;
+
+  const rawEndIndex = Math.round(candles.length - 1 - panOffset);
+  const approxIndex = Math.round(rawEndIndex + 0.5 - (chartWidth - x) / candleWidth);
+  const candleIndex = Math.max(0, Math.min(candles.length - 1, approxIndex));
+  const candle = candles[candleIndex];
+  if (!candle) return null;
+
+  const candleX = timeToX(candle.openTime, ctx);
+  if (Math.abs(x - candleX) > thresholdX + candleWidth * 0.8) {
+    return null;
+  }
+
+  // Calculate pixel Y positions of candle levels
+  const highY = priceToY(candle.high, ctx);
+  const lowY = priceToY(candle.low, ctx);
+  const openY = priceToY(candle.open, ctx);
+  const closeY = priceToY(candle.close, ctx);
+
+  const targets: { type: 'high' | 'low' | 'open' | 'close'; price: number; y: number }[] = [
+    { type: 'high', price: candle.high, y: highY },
+    { type: 'low', price: candle.low, y: lowY },
+    { type: 'open', price: candle.open, y: openY },
+    { type: 'close', price: candle.close, y: closeY }
+  ];
+
+  let bestTarget: (typeof targets)[0] | null = null;
+  let bestDist = Infinity;
+
+  for (const t of targets) {
+    const dist = Math.abs(y - t.y);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestTarget = t;
+    }
+  }
+
+  if (bestTarget && bestDist <= thresholdY) {
+    return {
+      time: candle.openTime,
+      price: bestTarget.price,
+      snapType: bestTarget.type,
+      candle,
+      canvasX: candleX,
+      canvasY: bestTarget.y
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Renders a glowing magnetic reticle and level badge on canvas when snap is active
+ */
+export function drawSnapIndicator(
+  ctx: CanvasRenderingContext2D,
+  snap: CandleSnapPoint
+) {
+  ctx.save();
+  ctx.shadowColor = '#06b6d4'; // Cyan neon magnet glow
+  ctx.shadowBlur = 10;
+  ctx.strokeStyle = '#06b6d4';
+  ctx.lineWidth = 1.5;
+
+  // Concentric circle
+  ctx.beginPath();
+  ctx.arc(snap.canvasX, snap.canvasY, 5, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Outer dashed magnetic ring
+  ctx.setLineDash([2, 2]);
+  ctx.beginPath();
+  ctx.arc(snap.canvasX, snap.canvasY, 9, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Center dot
+  ctx.fillStyle = '#22d3ee';
+  ctx.beginPath();
+  ctx.arc(snap.canvasX, snap.canvasY, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Floating level badge
+  const label = `Snap ${snap.snapType.toUpperCase()}: $${snap.price.toFixed(2)}`;
+  ctx.font = 'bold 9px monospace';
+  const textWidth = ctx.measureText(label).width;
+  ctx.fillStyle = '#0a0d17';
+  ctx.fillRect(snap.canvasX + 12, snap.canvasY - 14, textWidth + 8, 16);
+  ctx.strokeStyle = '#06b6d4';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(snap.canvasX + 12, snap.canvasY - 14, textWidth + 8, 16);
+
+  ctx.fillStyle = '#22d3ee';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, snap.canvasX + 16, snap.canvasY - 6);
+
+  ctx.restore();
+}
+
+/**
+ * Calculates the exact price level of a drawing at a specific timestamp across all 10 tools
  */
 export function getDrawingPriceAtTime(drawing: ChartDrawing, time: number): number | null {
   if (!drawing.points || drawing.points.length === 0) return null;
@@ -625,8 +748,41 @@ export function getDrawingPriceAtTime(drawing: ChartDrawing, time: number): numb
     case 'horizontal_ray':
       return drawing.points[0].price;
 
+    case 'vertical_line':
+      return drawing.points[0].price;
+
     case 'price_zone':
       return (drawing.points[0].price + (drawing.points[1]?.price || drawing.points[0].price)) / 2;
+
+    case 'rectangle':
+      return (drawing.points[0].price + (drawing.points[1]?.price || drawing.points[0].price)) / 2;
+
+    case 'parallel_channel': {
+      if (drawing.points.length < 2) return drawing.points[0].price;
+      const p1 = drawing.points[0];
+      const p2 = drawing.points[1];
+      const dt = p2.time - p1.time;
+      const slope = dt === 0 ? 0 : (p2.price - p1.price) / dt;
+      const basePrice = p1.price + slope * (time - p1.time);
+      const offset = (drawing.channelOffsetPrice || (p1.price * 0.015)) / 2;
+      return basePrice + offset;
+    }
+
+    case 'fibonacci_retracement': {
+      if (drawing.points.length < 2) return drawing.points[0].price;
+      // Golden ratio 61.8% level default for alert
+      const pTop = Math.max(drawing.points[0].price, drawing.points[1].price);
+      const pBot = Math.min(drawing.points[0].price, drawing.points[1].price);
+      return pTop - (pTop - pBot) * 0.618;
+    }
+
+    case 'fibonacci_extension': {
+      if (drawing.points.length < 2) return drawing.points[0].price;
+      const p1 = drawing.points[0];
+      const p2 = drawing.points[1];
+      const span = Math.abs(p2.price - p1.price);
+      return p2.price >= p1.price ? p2.price + span * 0.618 : p2.price - span * 0.618;
+    }
 
     case 'trendline':
     case 'extended_line': {

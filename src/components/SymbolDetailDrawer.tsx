@@ -2,7 +2,7 @@
  * Symbol Detail & Candlestick Chart Drawer Component
  * Slides in when a user clicks any asset in the watchlist.
  * Shows:
- * - Real-time Candlestick Chart powered by genuine WEEX Spot v3 data
+ * - Real-time Candlestick Chart powered by genuine Binance Spot market data
  * - Full timeframe selection (1m - 1M)
  * - Drag/pan, wheel/pinch zoom, reset view
  * - Market Structure (HH, HL, LH, LL, BOS, CHoCH)
@@ -279,7 +279,7 @@ export const SymbolDetailDrawer: React.FC<SymbolDetailDrawerProps> = ({
             <div className="p-4 rounded-lg bg-[#131722] border border-[#2a2e39] space-y-2">
               <div className="flex items-center gap-1.5 text-xs text-slate-400">
                 <Clock className="w-3.5 h-3.5" />
-                <span>Last WEEX Ticker Tick:</span>
+                <span>Last Binance Ticker Tick:</span>
                 <span className="font-mono text-slate-200">
                   {ticker.lastUpdateTime
                     ? new Date(ticker.lastUpdateTime).toLocaleTimeString()
@@ -291,10 +291,10 @@ export const SymbolDetailDrawer: React.FC<SymbolDetailDrawerProps> = ({
               </div>
             </div>
 
-            {/* WEEX Channel Info */}
+            {/* Binance Channel Info */}
             <div className="p-3 rounded bg-[#1e222d]/70 border border-[#2a2e39] text-[11px] font-mono text-slate-400 flex justify-between items-center">
-              <span>WEEX Stream Channel:</span>
-              <span className="text-blue-400 font-semibold">{ticker.symbol}@ticker</span>
+              <span>Binance Stream Channel:</span>
+              <span className="text-blue-400 font-semibold">{ticker.symbol.toLowerCase()}@miniTicker</span>
             </div>
           </div>
         )}

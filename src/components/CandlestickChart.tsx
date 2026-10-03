@@ -1,6 +1,6 @@
 /**
  * Real-Time TradingView Style Candlestick Chart Component
- * Powered exclusively by genuine WEEX Spot v3 market data.
+ * Powered exclusively by genuine Binance Spot market data.
  *
  * Interaction Features:
  * - Direct inline dropdown underneath clicked asset row
@@ -12,7 +12,7 @@
  * - Pointer capture for glitch-free dragging even when cursor leaves canvas
  * - Non-passive touch listeners with preventDefault() so table/page never scrolls while dragging chart
  * - ResizeObserver so canvas measures exact width and height immediately without blank frames
- * - Real-time candle movement: active candle body, wicks, and close update live with every WEEX tick
+ * - Real-time candle movement: active candle body, wicks, and close update live with every Binance tick
  * - Live Market Structure (HH, HL, LH, LL, BOS, CHoCH) calculated strictly from real candle prices
  * - Full timeframes: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 1w, 1M
  * - In-place close button to collapse dropdown
@@ -53,8 +53,17 @@ import {
   xToTime,
   priceToY as convertPriceToY,
   yToPrice as convertYToPrice,
-  hitTestDrawing
+  hitTestDrawing,
+  findCandleSnap,
+  drawSnapIndicator,
+  CandleSnapPoint
 } from '../utils/drawingGeometry.ts';
+import {
+  checkSignalTouch,
+  loadClearedSignalIds,
+  addClearedSignalId
+} from '../utils/signalTouchEngine.ts';
+import { settleSignalOutcome } from '../utils/performanceEngine.ts';
 import { DrawingToolbar } from './drawing/DrawingToolbar.tsx';
 import { DrawingPropertiesBar } from './drawing/DrawingPropertiesBar.tsx';
 import { DrawingAlertModal } from './drawing/DrawingAlertModal.tsx';
@@ -183,6 +192,65 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const drawingSnapshotRef = useRef<ChartDrawing | null>(null);
   const coordCtxRef = useRef<CoordinateContext | null>(null);
 
+  // Candle Wick Snapping State
+  const [isSnapEnabled, setIsSnapEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('nwwt_snap_enabled') !== 'false';
+  });
+
+  const toggleSnap = useCallback(() => {
+    setIsSnapEnabled((prev) => {
+      const next = !prev;
+      localStorage.setItem('nwwt_snap_enabled', String(next));
+      return next;
+    });
+  }, []);
+
+  // Drawing creation drag gesture refs (Press, Drag, Release lifecycle)
+  const isDrawingDragRef = useRef<boolean>(false);
+  const drawingDragStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const drawingStartPointRef = useRef<ChartPoint | null>(null);
+  const activeSnapRef = useRef<CandleSnapPoint | null>(null);
+
+  // Cleared Signal Lines Registry (Auto-removal of TP/SL on touch)
+  const [clearedSignalIds, setClearedSignalIds] = useState<Set<string>>(loadClearedSignalIds);
+
+  useEffect(() => {
+    const handleSignalCleared = (e: any) => {
+      const id = e.detail?.signalId;
+      if (id) {
+        setClearedSignalIds((prev) => new Set(prev).add(id));
+      }
+    };
+    window.addEventListener('nwwt_signal_cleared', handleSignalCleared);
+    return () => window.removeEventListener('nwwt_signal_cleared', handleSignalCleared);
+  }, []);
+
+  // Real-time touch monitoring across live price ticks and candle wicks
+  useEffect(() => {
+    if (!activeSignal || activeSignal.status !== 'ACTIVE' || !activeSignal.entryPrice) return;
+    if (clearedSignalIds.has(activeSignal.id)) return;
+
+    const currentPrice = ticker && ticker.lastPrice !== '--'
+      ? parseFloat(ticker.lastPrice)
+      : (candles.length > 0 ? candles[candles.length - 1].close : null);
+
+    const highPrice = ticker && ticker.highPrice !== '--' ? parseFloat(ticker.highPrice) : undefined;
+    const lowPrice = ticker && ticker.lowPrice !== '--' ? parseFloat(ticker.lowPrice) : undefined;
+
+    const touch = checkSignalTouch(activeSignal, currentPrice, highPrice, lowPrice, candles);
+
+    if (touch.isTouched && touch.touchedLevel) {
+      addClearedSignalId(activeSignal.id);
+      setClearedSignalIds((prev) => new Set(prev).add(activeSignal.id));
+      settleSignalOutcome(
+        activeSignal.id,
+        touch.touchedLevel === 'TP' ? 'WIN' : 'LOSS',
+        touch.touchPrice,
+        touch.reason
+      );
+    }
+  }, [activeSignal, ticker, candles, clearedSignalIds]);
+
   const selectedDrawing = useMemo(() => {
     return drawings.find((d) => d.id === selectedDrawingId) || null;
   }, [drawings, selectedDrawingId]);
@@ -208,7 +276,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
   // Market Structure toggle
   const [showMarketStructure, setShowMarketStructure] = useState<boolean>(() => {
-    return localStorage.getItem('weex_show_market_structure') !== 'false';
+    return localStorage.getItem('nwwt_show_market_structure') !== 'false';
   });
 
   // Swing High / Swing Low Sensitivity (pivot lookback candles: 1 to 4)
@@ -317,7 +385,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
   // Persist market structure toggle preference
   useEffect(() => {
-    localStorage.setItem('weex_show_market_structure', String(showMarketStructure));
+    localStorage.setItem('nwwt_show_market_structure', String(showMarketStructure));
   }, [showMarketStructure]);
 
   // ResizeObserver to track container dimensions immediately
@@ -338,14 +406,14 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     return () => ro.disconnect();
   }, []);
 
-  // Fetch real WEEX historical candles with automatic retry and abort protection
+  // Fetch real Binance historical candles with automatic retry and abort protection
   const handleManualRetry = useCallback(() => {
     if (!symbol) return;
     setIsLoading(true);
     setFetchError(null);
     fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&limit=250`)
       .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load WEEX candles (${res.status})`);
+        if (!res.ok) throw new Error(`Failed to load Binance candles (${res.status})`);
         return res.json();
       })
       .then((data) => {
@@ -384,7 +452,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           { signal: controller.signal }
         );
         if (!res.ok) {
-          throw new Error(`Failed to load WEEX candles (${res.status})`);
+          throw new Error(`Failed to load Binance candles (${res.status})`);
         }
         const data = await res.json();
         if (isCancelled) return;
@@ -427,7 +495,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   }, [symbol, timeframe]);
 
   // Real-time candle updates:
-  // Dynamically update active candle's close, high, low, wicks with live WEEX ticks
+  // Dynamically update active candle's close, high, low, wicks with live Binance ticks
   useEffect(() => {
     if (!ticker || ticker.lastPrice === '--') return;
 
@@ -649,18 +717,35 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
     // DRAWING CREATION MODE
     if (activeTool !== 'cursor') {
-      const clickPoint: ChartPoint = {
-        time: xToTime(x, coordCtx),
-        price: convertYToPrice(y, coordCtx)
-      };
+      dragModeRef.current = 'none';
+
+      let clickPoint: ChartPoint;
+      if (isSnapEnabled && coordCtx) {
+        const snap = findCandleSnap(x, y, coordCtx);
+        clickPoint = snap ? { time: snap.time, price: snap.price } : { time: xToTime(x, coordCtx), price: convertYToPrice(y, coordCtx) };
+        activeSnapRef.current = snap;
+      } else {
+        clickPoint = { time: xToTime(x, coordCtx), price: convertYToPrice(y, coordCtx) };
+        activeSnapRef.current = null;
+      }
 
       if (activeTool === 'horizontal_line' || activeTool === 'vertical_line') {
         completeNewDrawing(activeTool, [clickPoint]);
+        isDrawingDragRef.current = false;
+        drawingDragStartPosRef.current = null;
+        drawingStartPointRef.current = null;
       } else {
         if (pendingPoints.length === 0) {
+          isDrawingDragRef.current = true;
+          drawingDragStartPosRef.current = { x, y };
+          drawingStartPointRef.current = clickPoint;
           setPendingPoints([clickPoint]);
         } else {
           completeNewDrawing(activeTool, [...pendingPoints, clickPoint]);
+          isDrawingDragRef.current = false;
+          drawingDragStartPosRef.current = null;
+          drawingStartPointRef.current = null;
+          activeSnapRef.current = null;
         }
       }
       return;
@@ -700,7 +785,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     selectDrawing(null);
     dragModeRef.current = 'chart';
     setCursorStyle('grabbing');
-  }, [panOffset, priceOffset, priceScaleRatio, candleWidth, activeTool, pendingPoints, completeNewDrawing, setPendingPoints, drawings, selectDrawing]);
+  }, [panOffset, priceOffset, priceScaleRatio, candleWidth, activeTool, pendingPoints, completeNewDrawing, setPendingPoints, drawings, selectDrawing, isSnapEnabled]);
 
   // --- Pointer Move (Mouse & Touch drag) ---
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -711,16 +796,37 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const { chartWidth, chartHeight } = chartDimsRef.current;
+    const coordCtx = coordCtxRef.current;
 
     setMousePos({ x, y });
 
+    // Update candle wick snapping point
+    if (coordCtx && isSnapEnabled) {
+      const snap = findCandleSnap(x, y, coordCtx);
+      activeSnapRef.current = snap;
+    } else {
+      activeSnapRef.current = null;
+    }
+
+    // When a drawing tool is active, continuously display preview and prevent chart pan
+    if (activeTool !== 'cursor') {
+      dragModeRef.current = 'none';
+      setCursorStyle('crosshair');
+      return;
+    }
+
     // Handling Drawing Drag / Resize
-    if (drawingDragModeRef.current !== 'none' && drawingSnapshotRef.current && coordCtxRef.current && drawingDragStartPointRef.current) {
-      const coordCtx = coordCtxRef.current;
-      const currentHoverPoint: ChartPoint = {
-        time: xToTime(x, coordCtx),
-        price: convertYToPrice(y, coordCtx)
-      };
+    if (drawingDragModeRef.current !== 'none' && drawingSnapshotRef.current && coordCtx && drawingDragStartPointRef.current) {
+      let currentHoverPoint: ChartPoint;
+
+      if (isSnapEnabled && activeSnapRef.current && drawingDragModeRef.current === 'handle') {
+        currentHoverPoint = { time: activeSnapRef.current.time, price: activeSnapRef.current.price };
+      } else {
+        currentHoverPoint = {
+          time: xToTime(x, coordCtx),
+          price: convertYToPrice(y, coordCtx)
+        };
+      }
 
       const deltaPrice = currentHoverPoint.price - drawingDragStartPointRef.current.price;
       const deltaTime = currentHoverPoint.time - drawingDragStartPointRef.current.time;
@@ -793,7 +899,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       const newWidth = Math.max(3, Math.min(65, initialCandleWidthRef.current * scaleMultiplier));
       setCandleWidth(newWidth);
     }
-  }, [candleWidth, candles.length, activeTool, drawings, updateDrawing]);
+  }, [candleWidth, candles.length, activeTool, drawings, updateDrawing, isSnapEnabled]);
 
   // --- Pointer Up (Mouse & Touch end) ---
   const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -804,25 +910,68 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       } catch (err) {}
     }
 
+    const rect = canvas ? canvas.getBoundingClientRect() : null;
+    const x = rect ? e.clientX - rect.left : 0;
+    const y = rect ? e.clientY - rect.top : 0;
+    const coordCtx = coordCtxRef.current;
+
+    // 1. DRAG-TO-DRAW LIFECYCLE (Fix for disappearing drawings during drag)
+    if (
+      isDrawingDragRef.current &&
+      pendingPoints.length === 1 &&
+      drawingStartPointRef.current &&
+      drawingDragStartPosRef.current &&
+      coordCtx &&
+      activeTool !== 'cursor'
+    ) {
+      const startPos = drawingDragStartPosRef.current;
+      const dist = Math.hypot(x - startPos.x, y - startPos.y);
+
+      // If finger or mouse dragged more than 8 pixels, finalize immediately!
+      if (dist >= 8) {
+        let endPt: ChartPoint;
+        if (isSnapEnabled && activeSnapRef.current) {
+          endPt = { time: activeSnapRef.current.time, price: activeSnapRef.current.price };
+        } else {
+          endPt = { time: xToTime(x, coordCtx), price: convertYToPrice(y, coordCtx) };
+        }
+
+        completeNewDrawing(activeTool, [drawingStartPointRef.current, endPt]);
+        isDrawingDragRef.current = false;
+        drawingDragStartPosRef.current = null;
+        drawingStartPointRef.current = null;
+        activeSnapRef.current = null;
+        setCursorStyle('crosshair');
+        return;
+      } else {
+        // Just a tap without dragging: keep pendingPoints so user can do click-move-click
+        isDrawingDragRef.current = false;
+      }
+    }
+
     if (drawingDragModeRef.current !== 'none') {
       drawingDragModeRef.current = 'none';
       activeHandleIndexRef.current = null;
       drawingDragStartPointRef.current = null;
       drawingSnapshotRef.current = null;
+      activeSnapRef.current = null;
       setCursorStyle('crosshair');
       return;
     }
 
     dragModeRef.current = 'none';
     setCursorStyle('crosshair');
-  }, []);
+  }, [activeTool, pendingPoints, completeNewDrawing, isSnapEnabled]);
 
   const handlePointerLeave = useCallback(() => {
     if (dragModeRef.current === 'none') {
-      setMousePos(null);
+      if (pendingPoints.length === 0 && activeTool === 'cursor') {
+        setMousePos(null);
+      }
+      activeSnapRef.current = null;
       setCursorStyle('crosshair');
     }
-  }, []);
+  }, [pendingPoints.length, activeTool]);
 
   // Double click price scale to auto-fit
   const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1200,47 +1349,69 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       }
     }
 
-    // 3.5 Draw Active Signal Entry, Take Profit, and Stop Loss Levels (ONLY for ACTIVE setups)
-    // When TP or SL is hit, signal completes and trade levels are removed from the active chart
-    if (activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice) {
-      const drawSignalLevel = (price: number, label: string, color: string, badgeBg: string) => {
-        const y = priceToY(price);
-        if (y >= 0 && y <= chartHeight) {
-          ctx.save();
-          ctx.setLineDash([5, 4]);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 1.3;
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(chartWidth, y);
-          ctx.stroke();
-          ctx.restore();
+    // 3.5 Draw Active Signal Entry, Take Profit, and Stop Loss Levels
+    // AUTO-REMOVAL: When either TP or SL is touched by live tick or candle wicks, both lines are immediately removed
+    const isSignalCleared = activeSignal ? clearedSignalIds.has(activeSignal.id) : true;
 
-          // Right Price Scale Tag
-          ctx.fillStyle = badgeBg;
-          ctx.fillRect(chartWidth + 1, y - 8, rightMargin - 2, 16);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 1;
-          ctx.strokeRect(chartWidth + 1, y - 8, rightMargin - 2, 16);
+    if (activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && !isSignalCleared) {
+      const livePrice = ticker && ticker.lastPrice !== '--'
+        ? parseFloat(ticker.lastPrice)
+        : (candles.length > 0 ? candles[candles.length - 1].close : null);
+      const liveHigh = ticker && ticker.highPrice !== '--' ? parseFloat(ticker.highPrice) : undefined;
+      const liveLow = ticker && ticker.lowPrice !== '--' ? parseFloat(ticker.lowPrice) : undefined;
 
-          ctx.fillStyle = '#ffffff';
-          ctx.font = 'bold 9px monospace';
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(`${label}`, chartWidth + 4, y);
+      const frameTouch = checkSignalTouch(activeSignal, livePrice, liveHigh, liveLow, candles);
 
-          // Left Chart Watermark
-          ctx.fillStyle = color;
-          ctx.font = 'bold 9.5px monospace';
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'bottom';
-          ctx.fillText(`${label} $${formatPrice(price)}`, 10, y - 2);
-        }
-      };
+      if (frameTouch.isTouched && frameTouch.touchedLevel) {
+        // Immediate frame suppression: register cleared so lines vanish immediately without waiting for state re-render
+        addClearedSignalId(activeSignal.id);
+        settleSignalOutcome(
+          activeSignal.id,
+          frameTouch.touchedLevel === 'TP' ? 'WIN' : 'LOSS',
+          frameTouch.touchPrice,
+          frameTouch.reason
+        );
+        // Both lines are removed immediately (do not draw)
+      } else {
+        const drawSignalLevel = (price: number, label: string, color: string, badgeBg: string) => {
+          const y = priceToY(price);
+          if (y >= 0 && y <= chartHeight) {
+            ctx.save();
+            ctx.setLineDash([5, 4]);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(chartWidth, y);
+            ctx.stroke();
+            ctx.restore();
 
-      drawSignalLevel(activeSignal.entryPrice, 'ENTRY', '#f59e0b', '#b45309');
-      drawSignalLevel(activeSignal.takeProfit, 'TP', '#10b981', '#047857');
-      drawSignalLevel(activeSignal.stopLoss, 'SL', '#ef4444', '#b91c1c');
+            // Right Price Scale Tag
+            ctx.fillStyle = badgeBg;
+            ctx.fillRect(chartWidth + 1, y - 8, rightMargin - 2, 16);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(chartWidth + 1, y - 8, rightMargin - 2, 16);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(`${label}`, chartWidth + 4, y);
+
+            // Left Chart Watermark
+            ctx.fillStyle = color;
+            ctx.font = 'bold 9.5px monospace';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(`${label} $${formatPrice(price)}`, 10, y - 2);
+          }
+        };
+
+        drawSignalLevel(activeSignal.entryPrice, 'ENTRY', '#f59e0b', '#b45309');
+        drawSignalLevel(activeSignal.takeProfit, 'TP', '#10b981', '#047857');
+        drawSignalLevel(activeSignal.stopLoss, 'SL', '#ef4444', '#b91c1c');
+      }
     }
 
     // 3.6 Coordinate Context & User Chart Drawings
@@ -1263,10 +1434,18 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
     // 3.7 Draw In-Progress Drawing Preview
     if (pendingPoints.length > 0 && mousePos && activeTool !== 'cursor') {
-      const hoverPt: ChartPoint = {
-        time: xToTime(mousePos.x, coordCtx),
-        price: convertYToPrice(mousePos.y, coordCtx)
-      };
+      let hoverPt: ChartPoint;
+      if (isSnapEnabled && activeSnapRef.current) {
+        hoverPt = {
+          time: activeSnapRef.current.time,
+          price: activeSnapRef.current.price
+        };
+      } else {
+        hoverPt = {
+          time: xToTime(mousePos.x, coordCtx),
+          price: convertYToPrice(mousePos.y, coordCtx)
+        };
+      }
 
       const previewDrawing: ChartDrawing = {
         id: 'preview',
@@ -1289,6 +1468,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         updatedAt: 0
       };
       drawChartElement(ctx, previewDrawing, coordCtx, false);
+    }
+
+    // 3.8 Draw Candle Wick Snapping Magnet Reticle
+    if (isSnapEnabled && activeSnapRef.current && (activeTool !== 'cursor' || drawingDragModeRef.current === 'handle')) {
+      drawSnapIndicator(ctx, activeSnapRef.current);
     }
 
     // 4. Draw Current Live Market Price Line & Tag
@@ -1401,7 +1585,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     drawings,
     selectedDrawingId,
     pendingPoints,
-    activeTool
+    activeTool,
+    isSnapEnabled,
+    activeSignal,
+    clearedSignalIds,
+    ticker
   ]);
 
   // Current or inspected candle metrics for toolbar header
@@ -1542,6 +1730,8 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             onClearAll={clearAllDrawings}
             areAllVisible={areAllDrawingsVisible}
             onToggleAllVisibility={toggleAllVisibility}
+            isSnapEnabled={isSnapEnabled}
+            onToggleSnap={toggleSnap}
           />
 
           <div className="flex-1 relative overflow-hidden w-full h-full">
@@ -1566,7 +1756,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               className="absolute inset-0 w-full h-full block touch-none"
             />
 
-            {/* Selected Drawing Floating Properties Bar */}
+            {/* Selected Drawing Floating Properties Bar / Mobile Drawer */}
             {selectedDrawing && (
               <DrawingPropertiesBar
                 drawing={selectedDrawing}
@@ -1574,6 +1764,14 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                 onDuplicate={() => duplicateDrawing(selectedDrawing.id)}
                 onDelete={() => deleteDrawing(selectedDrawing.id)}
                 onOpenAlertModal={() => setIsAlertModalOpen(true)}
+                onClose={() => selectDrawing(null)}
+                isSnapEnabled={isSnapEnabled}
+                onToggleSnap={toggleSnap}
+                symbol={symbol}
+                timeframe={timeframe}
+                onAddAlert={(alertData) => addAlertToDrawing(selectedDrawing.id, alertData)}
+                onRemoveAlert={(alertId) => removeAlertFromDrawing(selectedDrawing.id, alertId)}
+                onToggleAlert={(alertId, enabled) => toggleAlertStatus(selectedDrawing.id, alertId, enabled)}
               />
             )}
 
@@ -1955,7 +2153,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             onClick={() => {
               const next = !showMarketStructure;
               setShowMarketStructure(next);
-              localStorage.setItem('weex_show_market_structure', String(next));
+              localStorage.setItem('nwwt_show_market_structure', String(next));
             }}
             className={`flex items-center gap-1 px-2 py-1 rounded border text-xs font-mono transition-colors cursor-pointer ${
               showMarketStructure
@@ -2006,7 +2204,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                     onClick={() => {
                       const next = !showMarketStructure;
                       setShowMarketStructure(next);
-                      localStorage.setItem('weex_show_market_structure', String(next));
+                      localStorage.setItem('nwwt_show_market_structure', String(next));
                     }}
                     className={`px-2 py-0.5 rounded text-[10px] font-bold transition cursor-pointer ${
                       showMarketStructure
@@ -2177,6 +2375,8 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           onClearAll={clearAllDrawings}
           areAllVisible={areAllDrawingsVisible}
           onToggleAllVisibility={toggleAllVisibility}
+          isSnapEnabled={isSnapEnabled}
+          onToggleSnap={toggleSnap}
         />
 
         <div className="flex-1 relative overflow-hidden w-full h-full">
@@ -2230,7 +2430,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             className="absolute inset-0 w-full h-full block touch-none"
           />
 
-          {/* Selected Drawing Floating Properties Bar */}
+          {/* Selected Drawing Floating Properties Bar / Mobile Drawer */}
           {selectedDrawing && (
             <DrawingPropertiesBar
               drawing={selectedDrawing}
@@ -2238,6 +2438,14 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               onDuplicate={() => duplicateDrawing(selectedDrawing.id)}
               onDelete={() => deleteDrawing(selectedDrawing.id)}
               onOpenAlertModal={() => setIsAlertModalOpen(true)}
+              onClose={() => selectDrawing(null)}
+              isSnapEnabled={isSnapEnabled}
+              onToggleSnap={toggleSnap}
+              symbol={symbol}
+              timeframe={timeframe}
+              onAddAlert={(alertData) => addAlertToDrawing(selectedDrawing.id, alertData)}
+              onRemoveAlert={(alertId) => removeAlertFromDrawing(selectedDrawing.id, alertId)}
+              onToggleAlert={(alertId, enabled) => toggleAlertStatus(selectedDrawing.id, alertId, enabled)}
             />
           )}
 

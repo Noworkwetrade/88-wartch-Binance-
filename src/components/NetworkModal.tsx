@@ -1,6 +1,6 @@
 /**
  * Network Modal Component
- * Displays real-time status of the WEEX WebSocket pool and 100-channel grouped connections
+ * Displays real-time status of the Binance WebSocket pool and connections
  */
 
 import React from 'react';
@@ -35,10 +35,10 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({
             <Server className="w-5 h-5 text-indigo-400" />
             <div>
               <h2 className="text-base font-bold text-slate-100">
-                WEEX WebSocket Connection Pool
+                Binance WebSocket Connection Pool
               </h2>
               <p className="text-xs text-slate-400">
-                Automatic 100-channel division across multiple WebSocket connections
+                Direct connection to Binance Spot live streaming ticker architecture
               </p>
             </div>
           </div>
@@ -153,7 +153,7 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({
 
         {/* Modal Footer */}
         <div className="p-3 bg-[#131722] border-t border-[#2a2e39] flex items-center justify-between text-xs text-slate-400">
-          <span>Client: NWWT-WEEX-WATCHLIST/1.0</span>
+          <span>Client: NWWT-BINANCE-WATCHLIST/6.0</span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition-colors cursor-pointer"

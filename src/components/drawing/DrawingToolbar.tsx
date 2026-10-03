@@ -22,7 +22,8 @@ import {
   Eye,
   EyeOff,
   ChevronRight,
-  ChevronDown
+  ChevronDown,
+  Magnet
 } from 'lucide-react';
 import { DrawingToolType } from '../../types/drawings.ts';
 
@@ -40,6 +41,8 @@ interface DrawingToolbarProps {
   onClearAll: () => void;
   areAllVisible?: boolean;
   onToggleAllVisibility?: () => void;
+  isSnapEnabled?: boolean;
+  onToggleSnap?: () => void;
 }
 
 export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({
@@ -55,7 +58,9 @@ export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({
   onOpenAlerts,
   onClearAll,
   areAllVisible = true,
-  onToggleAllVisibility
+  onToggleAllVisibility,
+  isSnapEnabled = false,
+  onToggleSnap
 }) => {
   // Sub-menu popout state
   const [activeFlyout, setActiveFlyout] = useState<'lines' | 'fib' | 'shapes' | null>(null);
@@ -292,6 +297,27 @@ export const DrawingToolbar: React.FC<DrawingToolbarProps> = ({
       </div>
 
       <div className="w-6 h-[1px] bg-[#1a1d28] my-1" />
+
+      {/* Magnet Wick Snapping Toggle */}
+      {onToggleSnap && (
+        <button
+          onClick={onToggleSnap}
+          className={`w-8 h-8 rounded flex items-center justify-center transition cursor-pointer relative group mb-1 ${
+            isSnapEnabled
+              ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/40 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
+              : 'hover:bg-[#151722] hover:text-white text-slate-500'
+          }`}
+          title={isSnapEnabled ? 'Candle Wick Snapping: ON' : 'Candle Wick Snapping: OFF'}
+        >
+          <Magnet className="w-4 h-4" />
+          {isSnapEnabled && (
+            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+          )}
+          <span className="hidden group-hover:block absolute left-10 ml-1 px-2 py-0.5 rounded bg-[#181a26] text-white text-[10px] whitespace-nowrap border border-[#2b2f42] z-50 pointer-events-none">
+            {isSnapEnabled ? 'Magnet Snapping (ON)' : 'Magnet Snapping (OFF)'}
+          </span>
+        </button>
+      )}
 
       {/* 5. Alerts Center */}
       <button
