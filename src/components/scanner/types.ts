@@ -38,6 +38,7 @@ export interface ScannerPattern {
   volumeConfirmation: boolean;
   structureConfluence: string;
   description: string;
+  confirmedCandleCloseTime?: number;
 }
 
 export type ScannerSignal = 'UP' | 'DOWN' | 'NO SETUP';
@@ -73,6 +74,7 @@ export interface ScannerAnalysisResult {
   resistanceLevel: number;
   volumeStatus: 'expanding' | 'average' | 'contracting';
   educationalSummary: string;
+  confirmedCandleCloseTime?: number;
   scannedAt: number;
 }
 

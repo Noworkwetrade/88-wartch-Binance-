@@ -55,6 +55,7 @@ import {
   MarketRegime
 } from '../types.ts';
 import { formatPrice } from './WatchlistTable.tsx';
+import { loadClearedSignalIds } from '../utils/signalTouchEngine.ts';
 
 interface WatchlistScannerPanelProps {
   scannerState: ScannerState;
@@ -63,11 +64,21 @@ interface WatchlistScannerPanelProps {
   onTimeframeChange: (tf: Timeframe) => void;
   onTriggerScan: (tf?: Timeframe) => void;
   performanceSignals: ScannerSignalItem[];
+  activeSignals?: ScannerSignalItem[];
+  completedSignals?: ScannerSignalItem[];
   performanceStats: SignalPerformanceStats;
   onClearHistory?: () => void;
 }
 
 const SCANNER_TIMEFRAMES: Timeframe[] = ['15m', '1h', '4h'];
+
+function formatCandleCloseTime(timestamp?: number): string {
+  if (!timestamp) return '--';
+  const d = new Date(timestamp);
+  const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const utcStr = d.toISOString().slice(11, 19) + ' UTC';
+  return `${timeStr} (${utcStr})`;
+}
 
 export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   scannerState,
@@ -76,6 +87,8 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   onTimeframeChange,
   onTriggerScan,
   performanceSignals,
+  activeSignals,
+  completedSignals,
   performanceStats,
   onClearHistory
 }) => {
@@ -86,9 +99,9 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   const [activeSubTab, setActiveSubTab] = useState<'signals' | 'research' | 'performance'>('signals');
   // Model filter for Signals tab: 'all' | 'ai_filtered' | 'original' | 'inverse' | 'ai_filtered_inverse'
   const [selectedModelFilter, setSelectedModelFilter] = useState<string>('ai_filtered');
-  // Signals status filter: 'all' | 'active' | 'completed'
-  const [signalFilter, setSignalFilter] = useState<'all' | 'active' | 'completed'>('all');
-  // Performance outcome filter
+  // Signals View Mode: 'active' (default active scanner) | 'completed_history' (separate completed view)
+  const [signalViewMode, setSignalViewMode] = useState<'active' | 'completed_history'>('active');
+  // Performance outcome filter for completed history
   const [historyFilter, setHistoryFilter] = useState<'all' | 'wins' | 'losses'>('all');
 
   // Single asset on active chart scanning state
@@ -135,44 +148,58 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
     }
   };
 
-  // Filter signals list based on selected model and status
-  const filteredSignals = useMemo(() => {
-    let list = performanceSignals;
+  // STRICT ACTIVE SIGNALS LIST: Genuinely active signals only.
+  // When a signal hits TP or SL, it is settled, recorded in cleared set, and removed immediately.
+  const activeSignalsList = useMemo(() => {
+    const clearedSet = loadClearedSignalIds();
+    let list = (activeSignals || performanceSignals).filter(
+      (s) => s.status === 'ACTIVE' && !clearedSet.has(s.id)
+    );
 
     // Filter by research model
     if (selectedModelFilter !== 'all') {
       list = list.filter((s) => (s.modelType || 'original') === selectedModelFilter);
-    }
-
-    // Filter by status
-    if (signalFilter === 'active') {
-      list = list.filter((s) => s.status === 'ACTIVE');
-    } else if (signalFilter === 'completed') {
-      list = list.filter((s) => s.status !== 'ACTIVE');
+    } else {
+      // Deduplicate identical underlying setups across models when "All Models" is selected
+      const seen = new Set<string>();
+      list = list.filter((s) => {
+        const key = `${s.asset}-${s.timeframe}-${s.confirmedCandleCloseTime || s.timestamp}-${s.direction}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
     }
 
     return [...list].sort((a, b) => {
-      if (a.status === 'ACTIVE' && b.status !== 'ACTIVE') return -1;
-      if (b.status === 'ACTIVE' && a.status !== 'ACTIVE') return 1;
+      // Latest confirmed candle close first
+      const timeA = a.confirmedCandleCloseTime || a.timestamp || 0;
+      const timeB = b.confirmedCandleCloseTime || b.timestamp || 0;
+      if (timeB !== timeA) return timeB - timeA;
       return (b.confidence || 0) - (a.confidence || 0);
     });
-  }, [performanceSignals, selectedModelFilter, signalFilter]);
+  }, [performanceSignals, activeSignals, selectedModelFilter]);
 
-  const latestSignal: ScannerSignalItem | null = filteredSignals.length > 0 ? filteredSignals[0] : null;
+  const latestActiveSignal: ScannerSignalItem | null = activeSignalsList.length > 0 ? activeSignalsList[0] : null;
 
-  // Filter completed signals in the performance tab
-  const filteredCompleted = useMemo(() => {
-    let list = performanceSignals.filter((s) => s.status !== 'ACTIVE');
+  // STRICT COMPLETED SIGNALS LIST: Available for separate completed history inspection.
+  const completedHistoryList = useMemo(() => {
+    const clearedSet = loadClearedSignalIds();
+    let list = (completedSignals || performanceSignals).filter(
+      (s) => s.status !== 'ACTIVE' || clearedSet.has(s.id)
+    );
+
     if (selectedModelFilter !== 'all') {
       list = list.filter((s) => (s.modelType || 'original') === selectedModelFilter);
     }
+
     if (historyFilter === 'wins') {
       list = list.filter((s) => s.status === 'WIN');
     } else if (historyFilter === 'losses') {
       list = list.filter((s) => s.status === 'LOSS');
     }
-    return list.sort((a, b) => (b.completedAt || b.timestamp) - (a.completedAt || a.timestamp));
-  }, [performanceSignals, selectedModelFilter, historyFilter]);
+
+    return [...list].sort((a, b) => (b.completedAt || b.timestamp || 0) - (a.completedAt || a.timestamp || 0));
+  }, [performanceSignals, completedSignals, selectedModelFilter, historyFilter]);
 
   // Models stats extraction from server or local
   const models = performanceStats.byModel || {
@@ -354,270 +381,400 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                 })}
               </div>
 
-              {/* Status Filter Pills */}
-              <div className="flex items-center gap-1">
-                {(['all', 'active', 'completed'] as const).map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setSignalFilter(f)}
-                    className={`px-1.5 py-0.5 rounded text-[10px] uppercase transition cursor-pointer ${
-                      signalFilter === f
-                        ? 'bg-[#1f2233] text-white font-bold border border-[#2e3248]'
-                        : 'text-slate-500 hover:text-slate-300'
-                    }`}
-                  >
-                    {f}
-                  </button>
-                ))}
+              {/* View Switcher: Active Scanner vs Completed History */}
+              <div className="flex items-center bg-[#13151f] rounded border border-[#202230] p-0.5">
+                <button
+                  onClick={() => setSignalViewMode('active')}
+                  className={`px-2 py-0.5 text-[10px] font-mono font-bold rounded transition cursor-pointer flex items-center gap-1 ${
+                    signalViewMode === 'active'
+                      ? 'bg-amber-500 text-black shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span>Active ({activeSignalsList.length})</span>
+                </button>
+                <button
+                  onClick={() => setSignalViewMode('completed_history')}
+                  className={`px-2 py-0.5 text-[10px] font-mono font-bold rounded transition cursor-pointer flex items-center gap-1 ${
+                    signalViewMode === 'completed_history'
+                      ? 'bg-amber-500 text-black shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Clock className="w-2.5 h-2.5" />
+                  <span>Completed ({completedHistoryList.length})</span>
+                </button>
               </div>
             </div>
 
-            {/* Prominent Latest Confirmed Signal Alert */}
-            {latestSignal && signalFilter !== 'completed' && (
-              <div className="p-3 bg-[#0d0f17] border-b border-[#1f2230]">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[10px] font-mono tracking-wider uppercase text-amber-400 font-bold flex items-center gap-1">
-                    <Sparkles className="w-3 h-3 text-amber-400" />
-                    Latest Signal • {(latestSignal.modelType || 'original').replace(/_/g, ' ').toUpperCase()}
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    {latestSignal.aiValidation && (
-                      <span
-                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border ${
-                          latestSignal.aiValidation.status === 'allow'
-                            ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                            : latestSignal.aiValidation.status === 'reject'
-                            ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
-                            : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
-                        }`}
-                      >
-                        AI: {latestSignal.aiValidation.status.toUpperCase()}
+            {/* ========================================================================= */}
+            {/* VIEW A: ACTIVE SCANNER VIEW (STRICTLY ACTIVE SIGNALS ONLY)                */}
+            {/* ========================================================================= */}
+            {signalViewMode === 'active' && (
+              <>
+                {/* Prominent Latest Confirmed Active Signal Alert */}
+                {latestActiveSignal && (
+                  <div className="p-3 bg-[#0d0f17] border-b border-[#1f2230]">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-mono tracking-wider uppercase text-amber-400 font-bold flex items-center gap-1">
+                        <Sparkles className="w-3 h-3 text-amber-400" />
+                        Latest Confirmed Signal • {(latestActiveSignal.modelType || 'original').replace(/_/g, ' ').toUpperCase()} • {latestActiveSignal.timeframe}
                       </span>
-                    )}
-
-                    {latestSignal.status === 'ACTIVE' ? (
-                      <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                        ACTIVE
-                      </span>
-                    ) : latestSignal.status === 'WIN' ? (
-                      <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                        TP REACHED
-                      </span>
-                    ) : latestSignal.status === 'LOSS' ? (
-                      <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-red-500/15 text-red-400 border border-red-500/30">
-                        SL TOUCHED
-                      </span>
-                    ) : (
-                      <span className="px-1.5 py-0.2 rounded text-[10px] font-mono text-slate-400 bg-slate-800">
-                        EXPIRED
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <div
-                  onClick={() => onSelectAsset(latestSignal.asset)}
-                  className="p-3 rounded-lg bg-[#12141e] border border-[#25283a] hover:border-amber-500/50 cursor-pointer transition group"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono font-bold text-sm text-white group-hover:text-amber-400 transition">
-                        {latestSignal.asset}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold flex items-center gap-1 ${
-                          latestSignal.direction === 'UP'
-                            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                            : 'bg-red-500/15 text-red-400 border border-red-500/30'
-                        }`}
-                      >
-                        {latestSignal.direction === 'UP' ? (
-                          <TrendingUp className="w-3.5 h-3.5" />
-                        ) : (
-                          <TrendingDown className="w-3.5 h-3.5" />
+                      <div className="flex items-center gap-1.5">
+                        {latestActiveSignal.aiValidation && (
+                          <span
+                            className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border ${
+                              latestActiveSignal.aiValidation.status === 'allow'
+                                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                                : latestActiveSignal.aiValidation.status === 'reject'
+                                ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                                : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+                            }`}
+                          >
+                            AI: {latestActiveSignal.aiValidation.status.toUpperCase()}
+                          </span>
                         )}
-                        {latestSignal.direction}
-                      </span>
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#1b1e2c] text-slate-300 border border-[#2a2e42]">
-                        {latestSignal.setupType}
-                      </span>
-                    </div>
 
-                    <div className="flex items-center gap-2 font-mono text-xs">
-                      <span className="font-bold text-white">
-                        {formatPrice(latestSignal.entryPrice || latestSignal.signalPrice)}
-                      </span>
-                      <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-amber-400 transition transform group-hover:translate-x-0.5" />
-                    </div>
-                  </div>
-
-                  {/* Target Levels Display: Entry, TP, SL */}
-                  <div className="mt-2.5 p-2 rounded bg-[#0a0c12] border border-[#1e2130] grid grid-cols-3 gap-2 text-center font-mono">
-                    <div>
-                      <div className="text-[10px] text-slate-500 uppercase">Entry Price</div>
-                      <div className="text-xs font-bold text-white">
-                        {formatPrice(latestSignal.entryPrice || latestSignal.signalPrice)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-emerald-400 uppercase font-semibold">Take Profit</div>
-                      <div className="text-xs font-bold text-emerald-400">
-                        {formatPrice(latestSignal.takeProfit)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-red-400 uppercase font-semibold">Stop Loss</div>
-                      <div className="text-xs font-bold text-red-400">
-                        {formatPrice(latestSignal.stopLoss)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                    {latestSignal.reason}
-                  </p>
-
-                  <div className="mt-2.5 pt-2 border-t border-[#1a1d29] flex items-center justify-between text-[11px] font-mono text-slate-400">
-                    <div className="flex items-center gap-2">
-                      {latestSignal.marketRegime && (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#1a1d28] text-slate-300 border border-[#282c3d]">
-                          {latestSignal.marketRegime.replace(/_/g, ' ')}
+                        <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                          ACTIVE
                         </span>
-                      )}
-                      <span>SL: <strong className="text-red-400">{formatPrice(latestSignal.stopLoss)}</strong></span>
+                      </div>
                     </div>
-                    <span className="text-[10px] text-amber-400/90 font-bold">
-                      {latestSignal.confidence}% Confidence
+
+                    <div
+                      onClick={() => onSelectAsset(latestActiveSignal.asset)}
+                      className="p-3 rounded-lg bg-[#12141e] border border-amber-500/40 hover:border-amber-500/70 cursor-pointer transition group shadow-md"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-bold text-sm text-white group-hover:text-amber-400 transition">
+                            {latestActiveSignal.asset}
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-[#1d2030] text-amber-400 border border-amber-500/30">
+                            {latestActiveSignal.timeframe}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold flex items-center gap-1 ${
+                              latestActiveSignal.direction === 'UP'
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                : 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                            }`}
+                          >
+                            {latestActiveSignal.direction === 'UP' ? (
+                              <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <TrendingDown className="w-3.5 h-3.5 text-rose-400" />
+                            )}
+                            {latestActiveSignal.direction === 'UP' ? 'BUY / LONG' : 'SELL / SHORT'}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#1b1e2c] text-slate-300 border border-[#2a2e42]">
+                            {latestActiveSignal.setupType}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 font-mono text-xs">
+                          <span className="font-bold text-white">
+                            ${formatPrice(latestActiveSignal.entryPrice || latestActiveSignal.signalPrice)}
+                          </span>
+                          <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-amber-400 transition transform group-hover:translate-x-0.5" />
+                        </div>
+                      </div>
+
+                      {/* Target Levels Display: Confirmed Entry, TP, SL */}
+                      <div className="mt-2.5 p-2 rounded bg-[#0a0c12] border border-[#1e2130] grid grid-cols-3 gap-2 text-center font-mono">
+                        <div>
+                          <div className="text-[10px] text-slate-500 uppercase">Confirmed Entry</div>
+                          <div className="text-xs font-bold text-white">
+                            ${formatPrice(latestActiveSignal.entryPrice || latestActiveSignal.signalPrice)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-emerald-400 uppercase font-semibold">Take Profit (TP)</div>
+                          <div className="text-xs font-bold text-emerald-400">
+                            ${formatPrice(latestActiveSignal.takeProfit)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-rose-400 uppercase font-semibold">Stop Loss (SL)</div>
+                          <div className="text-xs font-bold text-rose-400">
+                            ${formatPrice(latestActiveSignal.stopLoss)}
+                          </div>
+                        </div>
+                      </div>
+
+                      <p className="text-xs text-slate-300 mt-2 leading-relaxed">
+                        {latestActiveSignal.reason}
+                      </p>
+
+                      <div className="mt-2.5 pt-2 border-t border-[#1a1d29] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-400">
+                        <div className="flex items-center gap-2">
+                          <span className="flex items-center gap-1 text-slate-400">
+                            <Clock className="w-3 h-3 text-slate-500" />
+                            Confirmed Close: <strong className="text-slate-200">{formatCandleCloseTime(latestActiveSignal.confirmedCandleCloseTime || latestActiveSignal.timestamp)}</strong>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2.5">
+                          <span className="text-indigo-300 text-[10px]">
+                            1:{(Math.abs(latestActiveSignal.takeProfit - latestActiveSignal.entryPrice) / (Math.abs(latestActiveSignal.entryPrice - latestActiveSignal.stopLoss) || 1)).toFixed(2)} R:R
+                          </span>
+                          <span className="text-[10px] text-amber-400 font-bold">
+                            {latestActiveSignal.confidence}% Conf.
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Confirmed Active Signals List */}
+                <div className="p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-amber-400" />
+                      Active Scanner ({activeSignalsList.length})
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      {selectedModelFilter !== 'all' ? selectedModelFilter.replace(/_/g, ' ') : 'All models (deduplicated)'}
                     </span>
                   </div>
+
+                  {activeSignalsList.length === 0 ? (
+                    <div className="p-6 text-center rounded border border-[#181a24] bg-[#0c0d12] text-slate-500 text-xs font-mono">
+                      {isScanning
+                        ? 'Scanning market candles across pairs...'
+                        : `No active signals on ${timeframe}. Waiting for confirmed candle close with valid setup confluence.`}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {activeSignalsList.map((s) => {
+                        const isSelected = selectedAsset === s.asset;
+                        const isUp = s.direction === 'UP';
+
+                        return (
+                          <div
+                            key={s.id}
+                            onClick={() => onSelectAsset(s.asset)}
+                            className={`p-2.5 rounded-lg border transition cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#151824] border-amber-500/60 shadow-md'
+                                : 'bg-[#0d0e14] border-[#1a1c27] hover:border-slate-700 hover:bg-[#12141c]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-bold text-xs text-white">
+                                  {s.asset}
+                                </span>
+                                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-[#161822] text-amber-400 border border-amber-500/20">
+                                  {s.timeframe}
+                                </span>
+                                <span
+                                  className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold flex items-center gap-0.5 ${
+                                    isUp
+                                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                                      : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                                  }`}
+                                >
+                                  {isUp ? <TrendingUp className="w-3 h-3 text-emerald-400" /> : <TrendingDown className="w-3 h-3 text-rose-400" />}
+                                  {isUp ? 'BUY' : 'SELL'}
+                                </span>
+                                <span className="text-[10px] font-mono text-slate-300 truncate max-w-[120px]">
+                                  {s.setupType}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                {s.aiValidation && (
+                                  <span
+                                    className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold border ${
+                                      s.aiValidation.status === 'allow'
+                                        ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                        : s.aiValidation.status === 'reject'
+                                        ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                                        : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                                    }`}
+                                  >
+                                    AI: {s.aiValidation.status.toUpperCase()}
+                                  </span>
+                                )}
+
+                                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                  ACTIVE
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Three-Column Price Grid: Entry, TP, SL */}
+                            <div className="mt-2 p-1.5 rounded bg-[#08090d] border border-[#161822] grid grid-cols-3 gap-1 text-center font-mono text-[11px]">
+                              <div>
+                                <span className="text-[9px] text-slate-500 block">CONFIRMED ENTRY</span>
+                                <span className="font-semibold text-white">${formatPrice(s.entryPrice || s.signalPrice)}</span>
+                              </div>
+                              <div>
+                                <span className="text-[9px] text-emerald-400 block font-semibold">TAKE PROFIT</span>
+                                <span className="font-semibold text-emerald-400">${formatPrice(s.takeProfit)}</span>
+                              </div>
+                              <div>
+                                <span className="text-[9px] text-rose-400 block font-semibold">STOP LOSS</span>
+                                <span className="font-semibold text-rose-400">${formatPrice(s.stopLoss)}</span>
+                              </div>
+                            </div>
+
+                            <p className="text-[11px] text-slate-300 mt-1.5 line-clamp-2 leading-relaxed">
+                              {s.reason}
+                            </p>
+
+                            <div className="mt-1.5 pt-1 border-t border-[#161822] flex flex-wrap items-center justify-between gap-1 text-[10px] font-mono text-slate-400">
+                              <span className="flex items-center gap-1 text-slate-400">
+                                <Clock className="w-2.5 h-2.5 text-slate-500" />
+                                Confirmed: <strong className="text-slate-200">{formatCandleCloseTime(s.confirmedCandleCloseTime || s.timestamp)}</strong>
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-indigo-300">
+                                  1:{(Math.abs(s.takeProfit - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1)).toFixed(2)} R:R
+                                </span>
+                                <span className="text-amber-400 font-bold">{s.confidence}% Conf.</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
+              </>
             )}
 
-            {/* Confirmed Signals List */}
-            <div className="p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                  <Layers className="w-3.5 h-3.5 text-amber-400" />
-                  Signals ({filteredSignals.length})
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {selectedModelFilter !== 'all' ? selectedModelFilter.replace(/_/g, ' ') : 'All models'}
-                </span>
-              </div>
+            {/* ========================================================================= */}
+            {/* VIEW B: COMPLETED HISTORY VIEW (SEPARATE VIEW WHEN USER OPENS IT)         */}
+            {/* ========================================================================= */}
+            {signalViewMode === 'completed_history' && (
+              <div className="p-3 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-[#181a24]">
+                  <div>
+                    <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-slate-400" />
+                      Completed Signal History ({completedHistoryList.length})
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono block">
+                      Settled trades removed from active chart
+                    </span>
+                  </div>
 
-              {filteredSignals.length === 0 ? (
-                <div className="p-6 text-center rounded border border-[#181a24] bg-[#0c0d12] text-slate-500 text-xs font-mono">
-                  {isScanning
-                    ? 'Scanning market candles across pairs...'
-                    : `No signals found under '${selectedModelFilter}' on ${timeframe}. Waiting for structural breakout or retest.`}
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {filteredSignals.map((s) => {
-                    const isSelected = selectedAsset === s.asset;
-                    const isUp = s.direction === 'UP';
-
-                    return (
-                      <div
-                        key={s.id}
-                        onClick={() => onSelectAsset(s.asset)}
-                        className={`p-2.5 rounded-lg border transition cursor-pointer ${
-                          isSelected
-                            ? 'bg-[#151824] border-amber-500/60 shadow-md'
-                            : 'bg-[#0d0e14] border-[#1a1c27] hover:border-slate-700 hover:bg-[#12141c]'
+                  <div className="flex items-center gap-1 text-xs">
+                    {(['all', 'wins', 'losses'] as const).map((hf) => (
+                      <button
+                        key={hf}
+                        onClick={() => setHistoryFilter(hf)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase transition cursor-pointer ${
+                          historyFilter === hf
+                            ? 'bg-[#202436] text-white font-bold border border-[#303650]'
+                            : 'text-slate-500 hover:text-slate-300'
                         }`}
                       >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-bold text-xs text-white">
-                              {s.asset}
-                            </span>
-                            <span
-                              className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold flex items-center gap-0.5 ${
-                                isUp ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'
-                              }`}
-                            >
-                              {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                              {s.direction}
-                            </span>
-                            <span className="text-[10px] font-mono text-slate-400 truncate max-w-[110px]">
-                              {s.setupType}
-                            </span>
-                          </div>
+                        {hf}
+                      </button>
+                    ))}
 
-                          <div className="flex items-center gap-1.5">
-                            {s.aiValidation && (
+                    {onClearHistory && (
+                      <button
+                        onClick={onClearHistory}
+                        className="ml-1 p-1 rounded hover:bg-red-500/10 text-slate-500 hover:text-red-400 transition cursor-pointer"
+                        title="Clear completed history"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {completedHistoryList.length === 0 ? (
+                  <div className="p-6 text-center rounded border border-[#181a24] bg-[#0c0d12] text-slate-500 text-xs font-mono">
+                    No completed signals in history matching the filter. Active signals are monitored against live Binance prices.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {completedHistoryList.map((c) => {
+                      const isWin = c.status === 'WIN';
+                      const isLoss = c.status === 'LOSS';
+                      const isUp = c.direction === 'UP';
+
+                      return (
+                        <div
+                          key={c.id}
+                          onClick={() => onSelectAsset(c.asset)}
+                          className="p-2.5 rounded-lg border border-[#1a1c27] bg-[#0c0d13] hover:border-slate-700 cursor-pointer transition font-mono text-xs"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-white">{c.asset}</span>
+                              <span className="px-1.5 py-0.2 rounded text-[10px] bg-[#161822] text-slate-300">
+                                {c.timeframe}
+                              </span>
                               <span
-                                className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold border ${
-                                  s.aiValidation.status === 'allow'
-                                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                                    : s.aiValidation.status === 'reject'
-                                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-                                    : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                                className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                                  isUp ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
                                 }`}
                               >
-                                {s.aiValidation.status.toUpperCase()}
+                                {isUp ? 'BUY' : 'SELL'}
                               </span>
-                            )}
+                              <span className="text-[10px] text-slate-400 truncate max-w-[120px]">
+                                {c.setupType}
+                              </span>
+                            </div>
 
-                            {s.status === 'ACTIVE' ? (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                                ACTIVE
+                            <div>
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                  isWin
+                                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                    : isLoss
+                                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                                }`}
+                              >
+                                {isWin ? `✓ TP HIT ${c.pnlPercent ? `+${Math.abs(c.pnlPercent).toFixed(1)}%` : ''}` : isLoss ? `✕ SL HIT ${c.pnlPercent ? `-${Math.abs(c.pnlPercent).toFixed(1)}%` : ''}` : 'EXPIRED'}
                               </span>
-                            ) : s.status === 'WIN' ? (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                                WIN {s.pnlPercent ? `+${s.pnlPercent.toFixed(1)}%` : ''}
+                            </div>
+                          </div>
+
+                          <div className="mt-1.5 p-1.5 rounded bg-[#07080c] border border-[#141620] grid grid-cols-3 gap-1 text-center text-[10px]">
+                            <div>
+                              <span className="text-slate-500 block">ENTRY</span>
+                              <span className="text-slate-300 font-semibold">${formatPrice(c.entryPrice)}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 block">EXIT</span>
+                              <span className={`font-semibold ${isWin ? 'text-emerald-400' : isLoss ? 'text-rose-400' : 'text-slate-300'}`}>
+                                ${formatPrice(c.exitPrice || (isWin ? c.takeProfit : c.stopLoss))}
                               </span>
-                            ) : s.status === 'LOSS' ? (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-red-500/15 text-red-400 border border-red-500/30">
-                                LOSS {s.pnlPercent ? `${s.pnlPercent.toFixed(1)}%` : ''}
-                              </span>
-                            ) : (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono text-slate-400 bg-slate-800">
-                                EXPIRED
-                              </span>
-                            )}
+                            </div>
+                            <div>
+                              <span className="text-slate-500 block">TARGET TP / SL</span>
+                              <span className="text-slate-400">${formatPrice(c.takeProfit)} / ${formatPrice(c.stopLoss)}</span>
+                            </div>
+                          </div>
+
+                          {c.statusReason && (
+                            <p className="text-[10px] text-slate-400 mt-1 italic">
+                              {c.statusReason}
+                            </p>
+                          )}
+
+                          <div className="mt-1.5 pt-1 border-t border-[#141620] flex items-center justify-between text-[10px] text-slate-500">
+                            <span>Confirmed: {formatCandleCloseTime(c.confirmedCandleCloseTime || c.timestamp)}</span>
+                            <span>Settled: {c.completedAt ? new Date(c.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Done'}</span>
                           </div>
                         </div>
-
-                        {/* Three-Column Price Grid: Entry, TP, SL */}
-                        <div className="mt-2 p-1.5 rounded bg-[#08090d] border border-[#161822] grid grid-cols-3 gap-1 text-center font-mono text-[11px]">
-                          <div>
-                            <span className="text-[9px] text-slate-500 block">ENTRY</span>
-                            <span className="font-semibold text-white">{formatPrice(s.entryPrice || s.signalPrice)}</span>
-                          </div>
-                          <div>
-                            <span className="text-[9px] text-emerald-400 block font-semibold">TP</span>
-                            <span className="font-semibold text-emerald-400">{formatPrice(s.takeProfit)}</span>
-                          </div>
-                          <div>
-                            <span className="text-[9px] text-red-400 block font-semibold">SL</span>
-                            <span className="font-semibold text-red-400">{formatPrice(s.stopLoss)}</span>
-                          </div>
-                        </div>
-
-                        <p className="text-[11px] text-slate-300 mt-1.5 line-clamp-2 leading-relaxed">
-                          {s.reason}
-                        </p>
-
-                        <div className="mt-1.5 pt-1 border-t border-[#161822] flex items-center justify-between text-[10px] font-mono text-slate-500">
-                          <span className="flex items-center gap-1.5">
-                            <span>{s.timeframe} TF</span>
-                            {s.marketRegime && (
-                              <span className="text-slate-400 capitalize">• {s.marketRegime.replace(/_/g, ' ')}</span>
-                            )}
-                          </span>
-                          <span className="text-amber-400/90 font-bold">{s.confidence}% Conf.</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Pending Retest Setups Section */}
             <div className="p-3">
@@ -1073,7 +1230,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-mono font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-slate-400" />
-                  Settled Historical Log ({filteredCompleted.length})
+                  Settled Historical Log ({completedHistoryList.length})
                 </span>
 
                 {onClearHistory && (
@@ -1088,13 +1245,13 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                 )}
               </div>
 
-              {filteredCompleted.length === 0 ? (
+              {completedHistoryList.length === 0 ? (
                 <div className="p-4 text-center text-slate-500 font-mono text-xs">
                   No completed trades yet. Watching live market data for target touches.
                 </div>
               ) : (
                 <div className="space-y-1.5 font-mono max-h-[300px] overflow-y-auto pr-1">
-                  {filteredCompleted.map((c) => (
+                  {completedHistoryList.map((c) => (
                     <div
                       key={c.id}
                       className="p-2 rounded bg-[#090a0f] border border-[#161822] flex items-center justify-between text-xs"

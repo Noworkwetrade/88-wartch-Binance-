@@ -74,9 +74,28 @@ class ScannerService {
     this.scanInterval = null;
     this.watchInterval = null;
     this.isScanning = false;
+    this.onUpdate = null;
 
     // In-Memory Performance History: Map of id -> ScannerSignalItem
     this.performanceSignals = new Map();
+  }
+
+  /**
+   * Checks whether a signal has already been generated or recorded for a specific closed candle
+   * Prevents duplicate signals from being generated from the same closed candle.
+   */
+  hasSignalForCandle(symbol, timeframe, closeTime) {
+    if (!closeTime) return false;
+    for (const s of this.performanceSignals.values()) {
+      if (
+        s.asset === symbol &&
+        s.timeframe === timeframe &&
+        (s.confirmedCandleCloseTime === closeTime || s.timestamp === closeTime)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   start() {
@@ -113,6 +132,7 @@ class ScannerService {
     confidence,
     reason,
     timestamp,
+    confirmedCandleCloseTime,
     modelType = 'original',
     marketRegime = 'ranging',
     aiValidation = null,
@@ -141,7 +161,8 @@ class ScannerService {
     }
 
     const typePrefix = modelType === 'original' ? '' : `-${modelType}`;
-    const id = `${symbol}-${timeframe}-${setupType.toLowerCase().replace(/[^a-z0-9]/g, '')}-${direction.toLowerCase()}-${timestamp}${typePrefix}`;
+    const confirmedTime = confirmedCandleCloseTime || timestamp;
+    const id = `${symbol}-${timeframe}-${setupType.toLowerCase().replace(/[^a-z0-9]/g, '')}-${direction.toLowerCase()}-${confirmedTime}${typePrefix}`;
 
     return {
       id,
@@ -157,6 +178,7 @@ class ScannerService {
       confidence,
       reason,
       timestamp,
+      confirmedCandleCloseTime: confirmedTime,
       status: 'ACTIVE',
       statusReason: 'Watching live prices against TP and SL',
       expiryCandles,
@@ -272,13 +294,19 @@ class ScannerService {
 
     if (hasChanges) {
       this.syncActiveSignalsArray();
+      if (typeof this.onUpdate === 'function') {
+        this.onUpdate(this.getScanData());
+      }
     }
   }
 
   syncActiveSignalsArray() {
     const all = Array.from(this.performanceSignals.values());
-    all.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
-    this.signals = all;
+    // STRICT ACTIVE SIGNALS ONLY for the scanner live stream!
+    // Completed signals (WIN / LOSS / EXPIRED) are removed from active scanner immediately.
+    const activeOnly = all.filter((s) => s.status === 'ACTIVE');
+    activeOnly.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    this.signals = activeOnly;
   }
 
   async runScan(timeframe = '15m') {
@@ -298,16 +326,37 @@ class ScannerService {
 
       const pendingSetups = [];
       let processed = 0;
+      const now = Date.now();
 
       for (const symbol of scanList) {
         try {
           const rawCandles = await fetchKlines(symbol, timeframe, 60);
           if (!rawCandles || rawCandles.length < 15) continue;
 
-          // Closed candles strictly - last candle is active
-          const closedCandles = rawCandles.slice(0, rawCandles.length - 1);
-          const currentPrice = rawCandles[rawCandles.length - 1].close;
+          // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
+          // Never generate or display a signal while the current candlestick is still forming.
+          // Discard any unfinished candle whose closeTime > now or openTime + duration > now.
+          const tfDuration = (getTimeframeMinutes(timeframe) || 15) * 60 * 1000;
+          const closedCandles = (rawCandles || []).filter((c) => {
+            if (!c || isNaN(c.close) || c.close <= 0) return false;
+            const effectiveCloseTime = c.closeTime || (c.openTime + tfDuration - 1);
+            if (effectiveCloseTime > now) return false;
+            if (c.openTime + tfDuration > now) return false;
+            return true;
+          });
+          if (closedCandles.length < 10) continue;
 
+          const lastClosedCandle = closedCandles[closedCandles.length - 1];
+          const confirmedCandleCloseTime = lastClosedCandle.closeTime;
+
+          // STRICT REQUIREMENT 1 & 4: Prevent duplicate signals from being generated from the same closed candle.
+          // If a signal was already generated or settled from this exact closed candle, skip.
+          if (this.hasSignalForCandle(symbol, timeframe, confirmedCandleCloseTime)) {
+            processed++;
+            continue;
+          }
+
+          const currentPrice = lastClosedCandle.close;
           const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
 
           // Register generated signals across models
@@ -340,6 +389,10 @@ class ScannerService {
 
       this.syncActiveSignalsArray();
       this.watchActiveSignals();
+
+      if (typeof this.onUpdate === 'function') {
+        this.onUpdate(this.getScanData());
+      }
     } catch (err) {
       console.warn('[scannerService] Error during scan:', err.message);
       this.status = 'idle';
@@ -359,7 +412,7 @@ class ScannerService {
   /**
    * Scans specifically the asset selected on the active chart.
    * Does NOT scan a random asset. Does NOT switch the selected asset.
-   * Uses real closed candles and live market data.
+   * Uses strictly real closed candles and live market data.
    */
   async scanSingleAsset(symbol, timeframe = '15m') {
     if (!symbol) return null;
@@ -375,8 +428,29 @@ class ScannerService {
         };
       }
 
-      const closedCandles = rawCandles.slice(0, rawCandles.length - 1);
-      const currentPrice = rawCandles[rawCandles.length - 1].close;
+      const now = Date.now();
+      // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed
+      const tfDuration = (getTimeframeMinutes(timeframe) || 15) * 60 * 1000;
+      const closedCandles = (rawCandles || []).filter((c) => {
+        if (!c || isNaN(c.close) || c.close <= 0) return false;
+        const effectiveCloseTime = c.closeTime || (c.openTime + tfDuration - 1);
+        if (effectiveCloseTime > now) return false;
+        if (c.openTime + tfDuration > now) return false;
+        return true;
+      });
+      if (closedCandles.length < 10) {
+        return {
+          asset: symbol,
+          timeframe,
+          signal: null,
+          pendingRetest: null,
+          message: 'Awaiting confirmed candle close.'
+        };
+      }
+
+      const lastClosedCandle = closedCandles[closedCandles.length - 1];
+      const confirmedCandleCloseTime = lastClosedCandle.closeTime;
+      const currentPrice = lastClosedCandle.close;
 
       const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
 
@@ -387,6 +461,10 @@ class ScannerService {
 
       this.syncActiveSignalsArray();
       this.watchActiveSignals();
+
+      if (typeof this.onUpdate === 'function') {
+        this.onUpdate(this.getScanData());
+      }
 
       if (analysis.pendingRetest) {
         this.pendingRetests = [
@@ -399,6 +477,7 @@ class ScannerService {
         asset: symbol,
         timeframe,
         currentPrice,
+        confirmedCandleCloseTime,
         regimeData: analysis.regimeData,
         signal: analysis.aiFilteredSignal || analysis.originalSignal,
         originalSignal: analysis.originalSignal,
@@ -424,7 +503,18 @@ class ScannerService {
    * Evaluates candles, detects market regime, applies NWWT setup rules,
    * runs AI structure validation, and generates 4 research model representations.
    */
-  analyzeCandles(symbol, timeframe, closedCandles, currentPrice) {
+  analyzeCandles(symbol, timeframe, rawCandles, currentPrice) {
+    const now = Date.now();
+    // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
+    // Discard any forming candle whose closeTime > now or openTime + duration > now.
+    const tfDuration = (getTimeframeMinutes(timeframe) || 15) * 60 * 1000;
+    const closedCandles = (rawCandles || []).filter((c) => {
+      if (!c || isNaN(c.close) || c.close <= 0) return false;
+      const effectiveCloseTime = c.closeTime || (c.openTime + tfDuration - 1);
+      if (effectiveCloseTime > now) return false;
+      if (c.openTime + tfDuration > now) return false;
+      return true;
+    });
     const len = closedCandles.length;
     if (len < 10) return { originalSignal: null, pendingRetest: null };
 
@@ -491,6 +581,7 @@ class ScannerService {
         confidence: 96,
         reason: `Break & Retest Confirmed: Previous resistance ($${lastHigh.toFixed(2)}) defended as new support with lower wick rejection and green continuation close.`,
         timestamp: c0.closeTime,
+        confirmedCandleCloseTime: c0.closeTime,
         modelType: 'original',
         marketRegime: regimeData.regime
       });
@@ -505,6 +596,7 @@ class ScannerService {
         confidence: 96,
         reason: `Break & Retest Confirmed: Previous support ($${lastLow.toFixed(2)}) rejected as new resistance with upper wick rejection and red continuation close.`,
         timestamp: c0.closeTime,
+        confirmedCandleCloseTime: c0.closeTime,
         modelType: 'original',
         marketRegime: regimeData.regime
       });
@@ -537,6 +629,7 @@ class ScannerService {
           confidence: isVolExpanding ? 93 : 90,
           reason: `Strong Confirmed Break: Candle closed firmly above swing resistance $${lastHigh.toFixed(2)} with decisive bullish momentum${isVolExpanding ? ' and expanding volume' : ''}. Retest not required.`,
           timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
           modelType: 'original',
           marketRegime: regimeData.regime
         });
@@ -551,6 +644,7 @@ class ScannerService {
           confidence: isVolExpanding ? 93 : 90,
           reason: `Strong Confirmed Breakdown: Candle closed firmly below swing support $${lastLow.toFixed(2)} with decisive bearish momentum${isVolExpanding ? ' and expanding volume' : ''}. Retest not required.`,
           timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
           modelType: 'original',
           marketRegime: regimeData.regime
         });
@@ -572,6 +666,7 @@ class ScannerService {
           confidence: 89,
           reason: `Fakeout Rejection: Liquidity sweep above resistance $${lastHigh.toFixed(2)} met with aggressive seller absorption and heavy upper wick rejection.`,
           timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
           modelType: 'original',
           marketRegime: regimeData.regime
         });
@@ -586,6 +681,7 @@ class ScannerService {
           confidence: 89,
           reason: `Fakeout Rejection: Liquidity sweep below support $${lastLow.toFixed(2)} met with aggressive buyer absorption and strong lower wick defense.`,
           timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
           modelType: 'original',
           marketRegime: regimeData.regime
         });
@@ -610,6 +706,7 @@ class ScannerService {
           confidence: 86,
           reason: `Bullish Engulfing Confirmation: Closed at key structural support zone $${lastLow.toFixed(2)} engulfing previous candle body.`,
           timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
           modelType: 'original',
           marketRegime: regimeData.regime
         });
@@ -624,6 +721,7 @@ class ScannerService {
           confidence: 86,
           reason: `Bearish Engulfing Confirmation: Closed at key structural resistance zone $${lastHigh.toFixed(2)} engulfing previous candle body.`,
           timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
           modelType: 'original',
           marketRegime: regimeData.regime
         });
@@ -901,13 +999,25 @@ class ScannerService {
   }
 
   getScanData() {
+    const all = Array.from(this.performanceSignals.values());
+    const activeSignals = all
+      .filter((s) => s.status === 'ACTIVE')
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+    const completedSignals = all
+      .filter((s) => s.status !== 'ACTIVE')
+      .sort((a, b) => (b.completedAt || b.timestamp || 0) - (a.completedAt || a.timestamp || 0));
+
     return {
       status: this.status,
       timeframe: this.timeframe,
       scannedCount: this.scannedCount,
       totalSymbols: marketCache.tickers.size,
       lastScanTime: this.lastScanTime,
-      signals: this.signals,
+      signals: activeSignals, // ONLY genuinely active signals in active scanner!
+      completedSignals: completedSignals.slice(0, 150),
+      activeCount: activeSignals.length,
+      completedCount: completedSignals.length,
       pendingRetests: this.pendingRetests,
       performance: this.computePerformanceStats()
     };

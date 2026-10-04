@@ -8,6 +8,7 @@
     "build": "vite build",
     "start": "node server/index.js",
     "preview": "vite preview",
+    "test": "npx tsx scripts/testSignalTouch.ts && npx tsx scripts/testScannerValidation.ts",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

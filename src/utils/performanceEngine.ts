@@ -14,7 +14,7 @@
  */
 
 import { ScannerSignalItem, SignalPerformanceStats, SetupPerformance, Timeframe, Candle } from '../types.ts';
-import { checkSignalTouch, addClearedSignalId } from './signalTouchEngine.ts';
+import { checkSignalTouch, addClearedSignalId, loadClearedSignalIds } from './signalTouchEngine.ts';
 
 const STORAGE_KEY = 'nwwt_v8_signal_performance';
 
@@ -42,20 +42,56 @@ export function saveStoredSignals(signals: ScannerSignalItem[]): void {
 
 /**
  * Merge newly detected scanner signals into existing historical store
+ * STRICT REQUIREMENTS:
+ * - Never resurrect a completed or cleared signal as ACTIVE
+ * - Prevent duplicate signals generated from the same closed candle
+ * - Record settled status WIN or LOSS once and preserve it permanently
  */
 export function mergeScannerSignals(
   existingSignals: ScannerSignalItem[],
   incomingSignals: ScannerSignalItem[]
 ): ScannerSignalItem[] {
   const signalMap = new Map<string, ScannerSignalItem>();
+  const clearedSet = loadClearedSignalIds();
 
   for (const s of existingSignals) {
-    signalMap.set(s.id, s);
+    // If the signal was previously cleared via TP/SL touch, ensure it is not kept as ACTIVE
+    if (clearedSet.has(s.id) && s.status === 'ACTIVE') {
+      signalMap.set(s.id, { ...s, status: 'EXPIRED' });
+    } else {
+      signalMap.set(s.id, s);
+    }
   }
 
   for (const inc of incomingSignals) {
+    if (!inc || !inc.id) continue;
     const existing = signalMap.get(inc.id);
+
+    // If signal ID has already been cleared, it must NEVER reappear as ACTIVE
+    if (clearedSet.has(inc.id)) {
+      if (existing) {
+        if (inc.status && inc.status !== 'ACTIVE') {
+          signalMap.set(inc.id, { ...existing, ...inc });
+        }
+      } else if (inc.status && inc.status !== 'ACTIVE') {
+        signalMap.set(inc.id, inc);
+      }
+      continue;
+    }
+
     if (!existing) {
+      // Prevent duplicate signals from the same closed candle across identical asset/timeframe/model
+      const isDuplicateCandle = Array.from(signalMap.values()).some((s) =>
+        s.asset === inc.asset &&
+        s.timeframe === inc.timeframe &&
+        (s.modelType || 'original') === (inc.modelType || 'original') &&
+        (s.confirmedCandleCloseTime === inc.confirmedCandleCloseTime || s.timestamp === inc.timestamp)
+      );
+
+      if (isDuplicateCandle) {
+        continue;
+      }
+
       // New signal: ensure all V8 fields are initialized
       signalMap.set(inc.id, {
         ...inc,
@@ -65,7 +101,7 @@ export function mergeScannerSignals(
         lowestReached: inc.entryPrice
       });
     } else if (existing.status === 'ACTIVE' && inc.status && inc.status !== 'ACTIVE') {
-      // Update status if server settled it
+      // Update status if server or ticker settled it to WIN / LOSS / EXPIRED
       signalMap.set(inc.id, { ...existing, ...inc });
     }
   }

@@ -160,6 +160,9 @@ export async function initializeBackend(httpServer = server) {
     binanceSocket.start();
 
     console.log('[backend] Starting NWWT Market Scanner engine...');
+    scannerService.onUpdate = (data) => {
+      clientSocket.broadcastScannerData(data);
+    };
     scannerService.start();
 
     console.log('[backend] Binance Spot Market & Scanner Backend initialized successfully!');

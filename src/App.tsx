@@ -16,6 +16,7 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useBinanceMarket } from './hooks/useBinanceMarket.ts';
 import { useSignalPerformance } from './hooks/useSignalPerformance.ts';
+import { loadClearedSignalIds } from './utils/signalTouchEngine.ts';
 import { Header, NavTab } from './components/Header.tsx';
 import { WatchlistToolbar } from './components/WatchlistToolbar.tsx';
 import { WatchlistTable } from './components/WatchlistTable.tsx';
@@ -39,9 +40,11 @@ export default function App() {
   // V8 Signal Performance Engine
   const {
     signals: performanceSignals,
+    activeSignals,
+    completedSignals,
     stats: performanceStats,
     clearHistory
-  } = useSignalPerformance(scannerState.signals, tickersMap);
+  } = useSignalPerformance(scannerState.signals, tickersMap, scannerState.completedSignals);
 
   // Navigation Target State
   const [activeTab, setActiveTab] = useState<NavTab>('watchlist');
@@ -188,14 +191,15 @@ export default function App() {
   // Completed trades (WIN / LOSS / EXPIRED) must never leave levels behind on active chart
   const activeSignalForAsset = useMemo(() => {
     if (!selectedSymbolName) return null;
-    const activeList = performanceSignals.filter(
-      (s) => s.asset === selectedSymbolName && s.status === 'ACTIVE'
+    const clearedSet = loadClearedSignalIds();
+    const activeList = activeSignals.filter(
+      (s) => s.asset === selectedSymbolName && s.status === 'ACTIVE' && !clearedSet.has(s.id)
     );
     // Prioritize AI Filtered setup if available, otherwise original
     const aiFiltered = activeList.find((s) => s.modelType === 'ai_filtered');
     if (aiFiltered) return aiFiltered;
     return activeList[0] || null;
-  }, [performanceSignals, selectedSymbolName]);
+  }, [activeSignals, selectedSymbolName]);
 
   // Open asset chart on asset click (used by Watchlist & Scanner)
   const handleSelectAsset = useCallback((symbol: string) => {
@@ -252,9 +256,9 @@ export default function App() {
             >
               <Zap className="w-3.5 h-3.5" />
               <span>NWWT Scanner</span>
-              {scannerState.signals.length > 0 && (
+              {performanceStats.activeCount > 0 && (
                 <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${leftPaneTab === 'scanner' ? 'bg-black/20 text-black' : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'}`}>
-                  {scannerState.signals.length}
+                  {performanceStats.activeCount}
                 </span>
               )}
             </button>
@@ -288,6 +292,8 @@ export default function App() {
                 onTimeframeChange={(tf) => setSelectedTimeframe(tf)}
                 onTriggerScan={(tf) => triggerScan(tf || selectedTimeframe)}
                 performanceSignals={performanceSignals}
+                activeSignals={activeSignals}
+                completedSignals={completedSignals}
                 performanceStats={performanceStats}
                 onClearHistory={clearHistory}
               />
@@ -342,6 +348,8 @@ export default function App() {
               onTimeframeChange={(tf) => setSelectedTimeframe(tf)}
               onTriggerScan={(tf) => triggerScan(tf || selectedTimeframe)}
               performanceSignals={performanceSignals}
+              activeSignals={activeSignals}
+              completedSignals={completedSignals}
               performanceStats={performanceStats}
               onClearHistory={clearHistory}
             />

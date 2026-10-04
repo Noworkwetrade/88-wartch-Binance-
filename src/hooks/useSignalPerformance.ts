@@ -19,10 +19,12 @@ import {
   evaluateSignalsWithTicker,
   calculatePerformanceStats
 } from '../utils/performanceEngine.ts';
+import { loadClearedSignalIds } from '../utils/signalTouchEngine.ts';
 
 export function useSignalPerformance(
   incomingSignals: ScannerSignalItem[],
-  tickersMap: Map<string, TickerData>
+  tickersMap: Map<string, TickerData>,
+  incomingCompleted?: ScannerSignalItem[]
 ) {
   // 1. Initial State loaded from localStorage
   const [signals, setSignals] = useState<ScannerSignalItem[]>(() => {
@@ -34,14 +36,15 @@ export function useSignalPerformance(
 
   // 2. Merge incoming scanner signals whenever scanner updates
   useEffect(() => {
-    if (!incomingSignals || incomingSignals.length === 0) return;
+    const listToMerge = [...(incomingSignals || []), ...(incomingCompleted || [])];
+    if (listToMerge.length === 0) return;
 
     setSignals((prev) => {
-      const merged = mergeScannerSignals(prev, incomingSignals);
+      const merged = mergeScannerSignals(prev, listToMerge);
       saveStoredSignals(merged);
       return merged;
     });
-  }, [incomingSignals]);
+  }, [incomingSignals, incomingCompleted]);
 
   // Synchronize when a signal is settled on chart
   useEffect(() => {
@@ -57,7 +60,8 @@ export function useSignalPerformance(
   const lastEvalTimeRef = useRef<number>(0);
 
   useEffect(() => {
-    const activeList = signalsRef.current.filter((s) => s.status === 'ACTIVE');
+    const clearedSet = loadClearedSignalIds();
+    const activeList = signalsRef.current.filter((s) => s.status === 'ACTIVE' && !clearedSet.has(s.id));
     if (activeList.length === 0) return;
 
     const now = Date.now();
@@ -87,12 +91,15 @@ export function useSignalPerformance(
   }, [tickersMap]);
 
   // 4. Derived collections and metrics
+  // STRICT REQUIREMENT 2 & 4: Active signals only contain genuinely active, uncleared setups
   const activeSignals = useMemo(() => {
-    return signals.filter((s) => s.status === 'ACTIVE');
+    const clearedSet = loadClearedSignalIds();
+    return signals.filter((s) => s.status === 'ACTIVE' && !clearedSet.has(s.id));
   }, [signals]);
 
   const completedSignals = useMemo(() => {
-    return signals.filter((s) => s.status !== 'ACTIVE');
+    const clearedSet = loadClearedSignalIds();
+    return signals.filter((s) => s.status !== 'ACTIVE' || clearedSet.has(s.id));
   }, [signals]);
 
   const stats: SignalPerformanceStats = useMemo(() => {
@@ -100,9 +107,10 @@ export function useSignalPerformance(
   }, [signals]);
 
   const clearHistory = useCallback(() => {
-    // Retain only active signals, clear completed
+    // Retain only genuinely active signals, clear completed
+    const clearedSet = loadClearedSignalIds();
     setSignals((prev) => {
-      const kept = prev.filter((s) => s.status === 'ACTIVE');
+      const kept = prev.filter((s) => s.status === 'ACTIVE' && !clearedSet.has(s.id));
       saveStoredSignals(kept);
       return kept;
     });

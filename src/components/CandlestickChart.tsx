@@ -107,6 +107,45 @@ function getNicePriceStep(range: number, targetCount = 6): number {
   return cleanStep;
 }
 
+/**
+ * Audio chime feedback for TP and SL level touches using Web Audio API
+ */
+function playTradeSound(type: 'TP' | 'SL') {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    if (type === 'TP') {
+      // Harmonic ascending chime (C6 -> G6)
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1046.5, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1567.98, ctx.currentTime + 0.18);
+      gain.gain.setValueAtTime(0.22, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.35);
+    } else {
+      // Soft descending tone
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(311.13, ctx.currentTime + 0.22);
+      gain.gain.setValueAtTime(0.18, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+    }
+  } catch {
+    // Silently caught if browser audio is suspended
+  }
+}
+
 export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   symbol,
   ticker,
@@ -214,6 +253,23 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   // Cleared Signal Lines Registry (Auto-removal of TP/SL on touch)
   const [clearedSignalIds, setClearedSignalIds] = useState<Set<string>>(loadClearedSignalIds);
 
+  // Visual feedback notification for TP and SL trigger events
+  const [levelTriggerAlert, setLevelTriggerAlert] = useState<{
+    signalId: string;
+    type: 'TP' | 'SL';
+    price: number;
+    pnl: number;
+    timestamp: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!levelTriggerAlert) return;
+    const timer = setTimeout(() => {
+      setLevelTriggerAlert(null);
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [levelTriggerAlert]);
+
   useEffect(() => {
     const handleSignalCleared = (e: any) => {
       const id = e.detail?.signalId;
@@ -228,28 +284,41 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   // Real-time touch monitoring across live price ticks and candle wicks
   useEffect(() => {
     if (!activeSignal || activeSignal.status !== 'ACTIVE' || !activeSignal.entryPrice) return;
+    if (activeSignal.asset && activeSignal.asset !== symbol) return;
     if (clearedSignalIds.has(activeSignal.id)) return;
 
     const currentPrice = ticker && ticker.lastPrice !== '--'
       ? parseFloat(ticker.lastPrice)
       : (candles.length > 0 ? candles[candles.length - 1].close : null);
 
-    const highPrice = ticker && ticker.highPrice !== '--' ? parseFloat(ticker.highPrice) : undefined;
-    const lowPrice = ticker && ticker.lowPrice !== '--' ? parseFloat(ticker.lowPrice) : undefined;
-
-    const touch = checkSignalTouch(activeSignal, currentPrice, highPrice, lowPrice, candles);
+    const touch = checkSignalTouch(activeSignal, currentPrice, candles);
 
     if (touch.isTouched && touch.touchedLevel) {
+      const outcome = touch.touchedLevel === 'TP' ? 'WIN' : 'LOSS';
+      const isUp = activeSignal.direction === 'UP';
+      const pnlRaw = isUp
+        ? ((touch.touchPrice - activeSignal.entryPrice) / activeSignal.entryPrice) * 100
+        : ((activeSignal.entryPrice - touch.touchPrice) / activeSignal.entryPrice) * 100;
+      const pnl = outcome === 'WIN' ? Math.abs(pnlRaw) : -Math.abs(pnlRaw);
+
       addClearedSignalId(activeSignal.id);
       setClearedSignalIds((prev) => new Set(prev).add(activeSignal.id));
       settleSignalOutcome(
         activeSignal.id,
-        touch.touchedLevel === 'TP' ? 'WIN' : 'LOSS',
+        outcome,
         touch.touchPrice,
         touch.reason
       );
+      setLevelTriggerAlert({
+        signalId: activeSignal.id,
+        type: touch.touchedLevel === 'TP' ? 'TP' : 'SL',
+        price: touch.touchPrice,
+        pnl,
+        timestamp: Date.now()
+      });
+      playTradeSound(touch.touchedLevel === 'TP' ? 'TP' : 'SL');
     }
-  }, [activeSignal, ticker, candles, clearedSignalIds]);
+  }, [activeSignal, ticker, candles, clearedSignalIds, symbol]);
 
   const selectedDrawing = useMemo(() => {
     return drawings.find((d) => d.id === selectedDrawingId) || null;
@@ -1113,6 +1182,24 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       maxPrice = last ? last.high : 100;
     }
 
+    // When an active signal is present and not cleared, ensure auto-fit scale
+    // includes its Entry, Take Profit, and Stop Loss levels with comfortable margin
+    const isSignalActiveForScale = activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && !clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol;
+    if (isSignalActiveForScale) {
+      if (activeSignal.takeProfit) {
+        minPrice = Math.min(minPrice, activeSignal.takeProfit);
+        maxPrice = Math.max(maxPrice, activeSignal.takeProfit);
+      }
+      if (activeSignal.stopLoss) {
+        minPrice = Math.min(minPrice, activeSignal.stopLoss);
+        maxPrice = Math.max(maxPrice, activeSignal.stopLoss);
+      }
+      if (activeSignal.entryPrice) {
+        minPrice = Math.min(minPrice, activeSignal.entryPrice);
+        maxPrice = Math.max(maxPrice, activeSignal.entryPrice);
+      }
+    }
+
     const naturalSpan = maxPrice - minPrice || 1;
     const paddedNaturalMin = minPrice - naturalSpan * 0.08;
     const paddedNaturalMax = maxPrice + naturalSpan * 0.08;
@@ -1135,6 +1222,19 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     }
 
     const effectiveRange = effectiveMax - effectiveMin || 1;
+
+    // Coordinate Context for Drawing & Signal Anchoring
+    const coordCtx: CoordinateContext = {
+      candles,
+      timeframe,
+      candleWidth,
+      panOffset,
+      chartWidth,
+      chartHeight,
+      effectiveMin,
+      effectiveRange
+    };
+    coordCtxRef.current = coordCtx;
 
     const priceToY = (price: number) => {
       return chartHeight - ((price - effectiveMin) / effectiveRange) * chartHeight;
@@ -1349,83 +1449,219 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       }
     }
 
-    // 3.5 Draw Active Signal Entry, Take Profit, and Stop Loss Levels
+    // 3.5 Draw Active Signal Entry, Take Profit, and Stop Loss Levels (TradingView Style)
     // AUTO-REMOVAL: When either TP or SL is touched by live tick or candle wicks, both lines are immediately removed
     const isSignalCleared = activeSignal ? clearedSignalIds.has(activeSignal.id) : true;
 
-    if (activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && !isSignalCleared) {
+    if (activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && !isSignalCleared && activeSignal.asset === symbol) {
       const livePrice = ticker && ticker.lastPrice !== '--'
         ? parseFloat(ticker.lastPrice)
         : (candles.length > 0 ? candles[candles.length - 1].close : null);
-      const liveHigh = ticker && ticker.highPrice !== '--' ? parseFloat(ticker.highPrice) : undefined;
-      const liveLow = ticker && ticker.lowPrice !== '--' ? parseFloat(ticker.lowPrice) : undefined;
 
-      const frameTouch = checkSignalTouch(activeSignal, livePrice, liveHigh, liveLow, candles);
+      const frameTouch = checkSignalTouch(activeSignal, livePrice, candles);
 
       if (frameTouch.isTouched && frameTouch.touchedLevel) {
-        // Immediate frame suppression: register cleared so lines vanish immediately without waiting for state re-render
+        // Immediate frame suppression: register cleared so lines vanish immediately in this exact frame
         addClearedSignalId(activeSignal.id);
+        const outcome = frameTouch.touchedLevel === 'TP' ? 'WIN' : 'LOSS';
+        const isUp = activeSignal.direction === 'UP';
+        const pnlRaw = isUp
+          ? ((frameTouch.touchPrice - activeSignal.entryPrice) / activeSignal.entryPrice) * 100
+          : ((activeSignal.entryPrice - frameTouch.touchPrice) / activeSignal.entryPrice) * 100;
+        const pnl = outcome === 'WIN' ? Math.abs(pnlRaw) : -Math.abs(pnlRaw);
+
         settleSignalOutcome(
           activeSignal.id,
-          frameTouch.touchedLevel === 'TP' ? 'WIN' : 'LOSS',
+          outcome,
           frameTouch.touchPrice,
           frameTouch.reason
         );
+        setLevelTriggerAlert({
+          signalId: activeSignal.id,
+          type: frameTouch.touchedLevel === 'TP' ? 'TP' : 'SL',
+          price: frameTouch.touchPrice,
+          pnl,
+          timestamp: Date.now()
+        });
+        playTradeSound(frameTouch.touchedLevel === 'TP' ? 'TP' : 'SL');
         // Both lines are removed immediately (do not draw)
       } else {
-        const drawSignalLevel = (price: number, label: string, color: string, badgeBg: string) => {
-          const y = priceToY(price);
-          if (y >= 0 && y <= chartHeight) {
+        // Professional TradingView Position Visualization
+        const anchorTime = activeSignal.timestamp || (candles.length > 0 ? candles[0].openTime : Date.now());
+        const anchorX = timeToX(anchorTime, coordCtx);
+        const startX = Math.max(0, Math.min(chartWidth - 10, Math.round(anchorX)));
+        const endX = chartWidth;
+
+        if (startX < endX) {
+          const yEntry = Math.round(priceToY(activeSignal.entryPrice)) - 0.5;
+          const yTP = Math.round(priceToY(activeSignal.takeProfit)) - 0.5;
+          const ySL = Math.round(priceToY(activeSignal.stopLoss)) - 0.5;
+
+          const isUp = activeSignal.direction === 'UP';
+          const tpPnlPercent = isUp
+            ? ((activeSignal.takeProfit - activeSignal.entryPrice) / activeSignal.entryPrice) * 100
+            : ((activeSignal.entryPrice - activeSignal.takeProfit) / activeSignal.entryPrice) * 100;
+          const slPnlPercent = isUp
+            ? ((activeSignal.entryPrice - activeSignal.stopLoss) / activeSignal.entryPrice) * 100
+            : ((activeSignal.stopLoss - activeSignal.entryPrice) / activeSignal.entryPrice) * 100;
+          const riskRewardRatio = Math.abs(activeSignal.takeProfit - activeSignal.entryPrice) /
+            (Math.abs(activeSignal.entryPrice - activeSignal.stopLoss) || 1);
+
+          // 1. Shaded Position Zones (TradingView Style)
+          ctx.save();
+          // Target Profit Zone (Emerald)
+          const tpTop = Math.min(yEntry, yTP);
+          const tpHeight = Math.abs(yEntry - yTP);
+          if (tpHeight > 0) {
+            ctx.fillStyle = 'rgba(16, 185, 129, 0.08)';
+            ctx.fillRect(startX, tpTop, endX - startX, tpHeight);
+          }
+          // Stop Loss Risk Zone (Rose)
+          const slTop = Math.min(yEntry, ySL);
+          const slHeight = Math.abs(yEntry - ySL);
+          if (slHeight > 0) {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+            ctx.fillRect(startX, slTop, endX - startX, slHeight);
+          }
+          ctx.restore();
+
+          // 2. Vertical Anchor Connector Stem (TradingView Position Bracket)
+          if (startX >= 0 && startX < chartWidth) {
             ctx.save();
-            ctx.setLineDash([5, 4]);
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 1.3;
+            ctx.strokeStyle = isUp ? 'rgba(16, 185, 129, 0.6)' : 'rgba(239, 68, 68, 0.6)';
+            ctx.lineWidth = 1.8;
             ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(chartWidth, y);
+            ctx.moveTo(startX, Math.min(yTP, ySL));
+            ctx.lineTo(startX, Math.max(yTP, ySL));
+            ctx.stroke();
+
+            // Circular anchor knot at Entry level
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            ctx.arc(startX, yEntry, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#08090d';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Risk-to-Reward Ratio Tag anchored on the connector
+            if (startX + 75 < chartWidth) {
+              const tagY = (yTP + yEntry) / 2;
+              ctx.fillStyle = 'rgba(14, 16, 23, 0.88)';
+              ctx.strokeStyle = isUp ? 'rgba(16, 185, 129, 0.5)' : 'rgba(239, 68, 68, 0.5)';
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.roundRect(startX + 6, tagY - 9, 70, 18, 3);
+              ctx.fill();
+              ctx.stroke();
+
+              ctx.fillStyle = isUp ? '#34d399' : '#f87171';
+              ctx.font = 'bold 9px monospace';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(`R:R 1:${riskRewardRatio.toFixed(2)}`, startX + 41, tagY);
+            }
+            ctx.restore();
+          }
+
+          // 3. Draw Horizontal Price Levels
+          const drawSignalLine = (
+            y: number,
+            price: number,
+            label: string,
+            subLabel: string,
+            strokeColor: string,
+            badgeBg: string,
+            dashPattern: number[]
+          ) => {
+            if (y < -20 || y > chartHeight + 20) return;
+
+            ctx.save();
+            // Crisp horizontal line with subpixel alignment
+            ctx.setLineDash(dashPattern);
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(startX, y);
+            ctx.lineTo(endX, y);
             ctx.stroke();
             ctx.restore();
 
-            // Right Price Scale Tag
+            // Left on-canvas floating label tag
+            const labelX = Math.max(startX + 8, 10);
+            if (labelX + 90 < endX) {
+              ctx.save();
+              ctx.fillStyle = 'rgba(14, 16, 23, 0.9)';
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = 1;
+              const textStr = `${label}: $${formatPrice(price)} ${subLabel ? `(${subLabel})` : ''}`;
+              ctx.font = 'bold 9.5px monospace';
+              const textWidth = ctx.measureText(textStr).width;
+              ctx.beginPath();
+              ctx.roundRect(labelX, y - 8.5, textWidth + 10, 17, 3);
+              ctx.fill();
+              ctx.stroke();
+
+              ctx.fillStyle = strokeColor;
+              ctx.textAlign = 'left';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(textStr, labelX + 5, y);
+              ctx.restore();
+            }
+
+            // Right Price Scale Axis Pill (TradingView Style)
+            ctx.save();
+            const badgeHeight = 18;
+            const badgeY = y - badgeHeight / 2;
             ctx.fillStyle = badgeBg;
-            ctx.fillRect(chartWidth + 1, y - 8, rightMargin - 2, 16);
-            ctx.strokeStyle = color;
+            ctx.beginPath();
+            ctx.roundRect(chartWidth + 1, badgeY, rightMargin - 2, badgeHeight, 3);
+            ctx.fill();
+            ctx.strokeStyle = strokeColor;
             ctx.lineWidth = 1;
-            ctx.strokeRect(chartWidth + 1, y - 8, rightMargin - 2, 16);
+            ctx.stroke();
 
             ctx.fillStyle = '#ffffff';
             ctx.font = 'bold 9px monospace';
-            ctx.textAlign = 'left';
+            ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(`${label}`, chartWidth + 4, y);
+            ctx.fillText(`${label} ${formatPrice(price)}`, chartWidth + (rightMargin / 2), y);
+            ctx.restore();
+          };
 
-            // Left Chart Watermark
-            ctx.fillStyle = color;
-            ctx.font = 'bold 9.5px monospace';
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'bottom';
-            ctx.fillText(`${label} $${formatPrice(price)}`, 10, y - 2);
-          }
-        };
-
-        drawSignalLevel(activeSignal.entryPrice, 'ENTRY', '#f59e0b', '#b45309');
-        drawSignalLevel(activeSignal.takeProfit, 'TP', '#10b981', '#047857');
-        drawSignalLevel(activeSignal.stopLoss, 'SL', '#ef4444', '#b91c1c');
+          // Draw Entry, TP, and SL
+          drawSignalLine(
+            yTP,
+            activeSignal.takeProfit,
+            'TP',
+            `+${Math.abs(tpPnlPercent).toFixed(2)}%`,
+            '#10b981',
+            '#059669',
+            [6, 4]
+          );
+          drawSignalLine(
+            yEntry,
+            activeSignal.entryPrice,
+            'ENTRY',
+            '',
+            '#f59e0b',
+            '#d97706',
+            [4, 4]
+          );
+          drawSignalLine(
+            ySL,
+            activeSignal.stopLoss,
+            'SL',
+            `-${Math.abs(slPnlPercent).toFixed(2)}%`,
+            '#ef4444',
+            '#dc2626',
+            [6, 4]
+          );
+        }
       }
     }
 
-    // 3.6 Coordinate Context & User Chart Drawings
-    const coordCtx: CoordinateContext = {
-      candles,
-      timeframe,
-      candleWidth,
-      panOffset,
-      chartWidth,
-      chartHeight,
-      effectiveMin,
-      effectiveRange
-    };
-    coordCtxRef.current = coordCtx;
+    // 3.6 User Chart Drawings
 
     for (const drawing of drawings) {
       const isSelected = selectedDrawingId === drawing.id;
@@ -1669,7 +1905,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
 
         {/* Active Signal HUD Banner */}
-        {activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && (
+        {activeSignal && activeSignal.entryPrice && !clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
           <div className="px-3.5 py-1 bg-[#0d0f18] border-b border-[#1c1f2e] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shrink-0">
             <div className="flex items-center gap-3">
               <span className="flex items-center gap-1 font-bold text-amber-400">
@@ -1684,6 +1920,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               </span>
               <span className="text-slate-400">
                 SL: <strong className="text-red-400">${formatPrice(activeSignal.stopLoss)}</strong>
+              </span>
+              <span className="text-slate-400 hidden sm:inline">
+                R:R: <strong className="text-indigo-300">1:{(Math.abs(activeSignal.takeProfit - activeSignal.entryPrice) / (Math.abs(activeSignal.entryPrice - activeSignal.stopLoss) || 1)).toFixed(2)}</strong>
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -1712,7 +1951,22 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               <span className="text-[10px] text-slate-500">{activeSignal.confidence}% Conf.</span>
             </div>
           </div>
-        )}
+        ) : activeSignal && clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
+          <div className="px-3.5 py-1 bg-[#091414] border-b border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                TRADE SETTLED
+              </span>
+              <span className="text-slate-300 font-semibold">{activeSignal.setupType}</span>
+              <span className="text-slate-400">
+                Entry: ${formatPrice(activeSignal.entryPrice)} • TP: ${formatPrice(activeSignal.takeProfit)} • SL: ${formatPrice(activeSignal.stopLoss)}
+              </span>
+            </div>
+            <div className="text-[10px] text-emerald-400 font-semibold">
+              Level Reached • Lines Removed from Active Chart
+            </div>
+          </div>
+        ) : null}
 
         {/* Fullscreen Canvas Area with Left Drawing Toolbar */}
         <div className="flex-1 flex overflow-hidden w-full h-full relative">
@@ -1735,6 +1989,42 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           />
 
           <div className="flex-1 relative overflow-hidden w-full h-full">
+            {/* Visual Level Trigger Feedback Banner */}
+            {levelTriggerAlert && (
+              <div
+                className={`absolute top-3 left-1/2 -translate-x-1/2 z-30 px-3.5 py-2 rounded-lg shadow-2xl border flex items-center gap-3 font-mono text-xs select-none max-w-[90vw] animate-bounce-short ${
+                  levelTriggerAlert.type === 'TP'
+                    ? 'bg-[#064e3b]/95 border-emerald-500 text-emerald-100 shadow-emerald-950/60'
+                    : 'bg-[#4c0519]/95 border-rose-500 text-rose-100 shadow-rose-950/60'
+                }`}
+              >
+                <div
+                  className={`p-1.5 rounded-full shrink-0 ${
+                    levelTriggerAlert.type === 'TP' ? 'bg-emerald-500/25 text-emerald-300' : 'bg-rose-500/25 text-rose-300'
+                  }`}
+                >
+                  {levelTriggerAlert.type === 'TP' ? <Target className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="font-bold flex items-center gap-1.5 flex-wrap">
+                    <span>{levelTriggerAlert.type === 'TP' ? '🎯 TAKE PROFIT REACHED' : '🛑 STOP LOSS TRIGGERED'}</span>
+                    <span className="text-[10px] opacity-75 font-normal">({symbol})</span>
+                  </div>
+                  <div className="text-[11px] opacity-90 truncate">
+                    Exit: <strong className="text-white">${formatPrice(levelTriggerAlert.price)}</strong>
+                    {' '}({levelTriggerAlert.pnl >= 0 ? `+${levelTriggerAlert.pnl.toFixed(2)}%` : `${levelTriggerAlert.pnl.toFixed(2)}%`})
+                    {' • '}Lines removed
+                  </div>
+                </div>
+                <button
+                  onClick={() => setLevelTriggerAlert(null)}
+                  className="p-1 rounded text-white/60 hover:text-white hover:bg-white/10 transition cursor-pointer shrink-0 ml-1"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             {isLoading && (
               <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
                 <div className="flex flex-col items-center gap-2">
@@ -1890,7 +2180,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
 
         {/* Setup Condition Display (Answers "Is there a setup?" - Requirement 6) */}
-        {activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice ? (
+        {activeSignal && activeSignal.entryPrice && !clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
           <div className="p-2 rounded bg-[#10131d] border border-amber-500/30 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
             <div className="flex items-center gap-2.5 flex-wrap">
               <span
@@ -1911,6 +2201,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               </span>
               <span className="text-slate-400">
                 SL: <strong className="text-red-400">${formatPrice(activeSignal.stopLoss)}</strong>
+              </span>
+              <span className="text-slate-400 hidden sm:inline">
+                R:R: <strong className="text-indigo-300">1:{(Math.abs(activeSignal.takeProfit - activeSignal.entryPrice) / (Math.abs(activeSignal.entryPrice - activeSignal.stopLoss) || 1)).toFixed(2)}</strong>
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -1937,6 +2230,21 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                 WATCHING LIVE
               </span>
               <span className="text-[10px] text-slate-400">{activeSignal.confidence}% Conf.</span>
+            </div>
+          </div>
+        ) : activeSignal && clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
+          <div className="p-2 rounded bg-[#091414] border border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+            <div className="flex items-center gap-2">
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                TRADE SETTLED
+              </span>
+              <span className="text-slate-300 font-semibold">{activeSignal.setupType}</span>
+              <span className="text-slate-400">
+                Entry: ${formatPrice(activeSignal.entryPrice)} • TP: ${formatPrice(activeSignal.takeProfit)} • SL: ${formatPrice(activeSignal.stopLoss)}
+              </span>
+            </div>
+            <div className="text-[11px] text-emerald-400 font-bold">
+              Level Reached • Lines Removed from Active Chart
             </div>
           </div>
         ) : (
@@ -2380,6 +2688,42 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         />
 
         <div className="flex-1 relative overflow-hidden w-full h-full">
+          {/* Visual Level Trigger Feedback Banner */}
+          {levelTriggerAlert && (
+            <div
+              className={`absolute top-3 left-1/2 -translate-x-1/2 z-30 px-3.5 py-2 rounded-lg shadow-2xl border flex items-center gap-3 font-mono text-xs select-none max-w-[90vw] animate-bounce-short ${
+                levelTriggerAlert.type === 'TP'
+                  ? 'bg-[#064e3b]/95 border-emerald-500 text-emerald-100 shadow-emerald-950/60'
+                  : 'bg-[#4c0519]/95 border-rose-500 text-rose-100 shadow-rose-950/60'
+              }`}
+            >
+              <div
+                className={`p-1.5 rounded-full shrink-0 ${
+                  levelTriggerAlert.type === 'TP' ? 'bg-emerald-500/25 text-emerald-300' : 'bg-rose-500/25 text-rose-300'
+                }`}
+              >
+                {levelTriggerAlert.type === 'TP' ? <Target className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
+              </div>
+              <div className="min-w-0">
+                <div className="font-bold flex items-center gap-1.5 flex-wrap">
+                  <span>{levelTriggerAlert.type === 'TP' ? '🎯 TAKE PROFIT REACHED' : '🛑 STOP LOSS TRIGGERED'}</span>
+                  <span className="text-[10px] opacity-75 font-normal">({symbol})</span>
+                </div>
+                <div className="text-[11px] opacity-90 truncate">
+                  Exit: <strong className="text-white">${formatPrice(levelTriggerAlert.price)}</strong>
+                  {' '}({levelTriggerAlert.pnl >= 0 ? `+${levelTriggerAlert.pnl.toFixed(2)}%` : `${levelTriggerAlert.pnl.toFixed(2)}%`})
+                  {' • '}Lines removed
+                </div>
+              </div>
+              <button
+                onClick={() => setLevelTriggerAlert(null)}
+                className="p-1 rounded text-white/60 hover:text-white hover:bg-white/10 transition cursor-pointer shrink-0 ml-1"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {isLoading && (
             <div className="absolute inset-0 bg-[#070709]/80 backdrop-blur-xs flex items-center justify-center z-10">
               <div className="flex flex-col items-center gap-2">

@@ -153,6 +153,7 @@ export interface ScannerSignalItem {
   confidence: number;
   reason: string;
   timestamp: number;
+  confirmedCandleCloseTime?: number;
   // Performance Engine Fields
   status: SignalStatus;
   statusReason?: string;
@@ -268,6 +269,9 @@ export interface ScannerState {
   totalSymbols: number;
   lastScanTime: number;
   signals: ScannerSignalItem[];
+  completedSignals?: ScannerSignalItem[];
+  activeCount?: number;
+  completedCount?: number;
   pendingRetests: PendingRetestItem[];
   performance?: SignalPerformanceStats;
 }

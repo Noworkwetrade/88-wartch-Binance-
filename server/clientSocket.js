@@ -141,6 +141,25 @@ class ClientSocketServer {
     }
   }
 
+  broadcastScannerData(data = null) {
+    if (this.clients.size === 0) return;
+    try {
+      const message = JSON.stringify({
+        type: 'scanner_update',
+        data: data || scannerService.getScanData()
+      });
+      for (const client of this.clients) {
+        if (client.readyState === WebSocket.OPEN) {
+          try {
+            client.send(message);
+          } catch (e) {}
+        }
+      }
+    } catch (err) {
+      // ignore
+    }
+  }
+
   startBatchBroadcast() {
     if (this.batchInterval) clearInterval(this.batchInterval);
 
