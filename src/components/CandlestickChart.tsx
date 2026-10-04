@@ -584,7 +584,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           low: currentPrice,
           close: currentPrice,
           volume: parseFloat(ticker.volume) || 0,
-          closeTime: openTime + intervalMs
+          closeTime: openTime + intervalMs - 1
         };
         return [newCandle];
       }
@@ -594,6 +594,10 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
       // If tick time surpassed interval duration, append new candle
       if (tickTime >= lastCandle.openTime + intervalMs) {
+        const closedPrevious: Candle = {
+          ...lastCandle,
+          closeTime: lastCandle.openTime + intervalMs - 1
+        };
         const newOpenTime = Math.floor(tickTime / intervalMs) * intervalMs;
         const newCandle: Candle = {
           openTime: newOpenTime,
@@ -602,17 +606,22 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           low: currentPrice,
           close: currentPrice,
           volume: 0,
-          closeTime: newOpenTime + intervalMs
+          closeTime: newOpenTime + intervalMs - 1
         };
-        return [...prevCandles, newCandle];
+        const next = [...prevCandles];
+        next[lastIdx] = closedPrevious;
+        return [...next, newCandle];
       } else {
-        // Update active candle in real time
+        // Update active candle in real time without corrupting its true closeTime
+        const targetCloseTime = lastCandle.closeTime && lastCandle.closeTime > lastCandle.openTime + intervalMs / 2
+          ? lastCandle.closeTime
+          : lastCandle.openTime + intervalMs - 1;
         const updatedLast: Candle = {
           ...lastCandle,
           close: currentPrice,
           high: Math.max(lastCandle.high, currentPrice),
           low: Math.min(lastCandle.low, currentPrice),
-          closeTime: tickTime
+          closeTime: targetCloseTime
         };
         const next = [...prevCandles];
         next[lastIdx] = updatedLast;
@@ -621,10 +630,25 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     });
   }, [ticker, timeframe]);
 
-  // Calculate Market Structure from actual candle data with adjustable swing sensitivity
+  // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
+  // Never detect, display, or generate a signal or market structure break from a candle that is still forming.
+  const closedCandles = useMemo(() => {
+    const now = Date.now();
+    const tfDuration = getTimeframeDurationMs(timeframe);
+    return candles.filter((c) => {
+      if (!c || isNaN(c.close) || c.close <= 0) return false;
+      const effectiveCloseTime = c.closeTime || (c.openTime + tfDuration - 1);
+      if (effectiveCloseTime >= now) return false;
+      if (c.openTime + tfDuration > now) return false;
+      if (c.openTime > now) return false;
+      return true;
+    });
+  }, [candles, timeframe]);
+
+  // Calculate Market Structure from confirmed closed candle data strictly
   const marketStructure: MarketStructureResult = useMemo(() => {
-    return calculateMarketStructure(candles, swingSensitivity);
-  }, [candles, swingSensitivity]);
+    return calculateMarketStructure(closedCandles, swingSensitivity);
+  }, [closedCandles, swingSensitivity]);
 
   const currentPriceVal = useMemo(() => {
     if (candles.length > 0) return candles[candles.length - 1].close;
@@ -682,16 +706,16 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     return runChartScan(
       symbol,
       timeframe,
-      candles,
+      closedCandles,
       {
-        latestCandleVolume: candles.length > 0 ? candles[candles.length - 1].volume : 0,
+        latestCandleVolume: closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].volume : 0,
         total24hVolume: ticker?.volume || '0',
         quoteVolume: ticker?.quoteVolume
       },
       marketStructure,
       currentPriceVal
     );
-  }, [symbol, timeframe, candles, marketStructure, currentPriceVal, ticker]);
+  }, [symbol, timeframe, closedCandles, marketStructure, currentPriceVal, ticker]);
 
   // Reset View to latest price & auto-scale
   const handleResetView = useCallback(() => {

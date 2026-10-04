@@ -67,7 +67,7 @@ export function calculateMarketStructure(candles: Candle[], lookback = 2): Marke
       const type: SwingType = lastSwingLow ? (current.low >= lastSwingLow.price ? 'HL' : 'LL') : 'LL';
       const point: SwingPoint = {
         index: i,
-        time: current.low,
+        time: current.openTime,
         price: current.low,
         type,
         isHigh: false

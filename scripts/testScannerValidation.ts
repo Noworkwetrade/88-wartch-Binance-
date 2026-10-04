@@ -154,6 +154,61 @@ async function runAll12Tests() {
     const scanEngulfingBeforeClose = runChartScan('BTCUSDT', '15m', [...baseClosedCandles, formingEngulfing], dummyVol, dummyMS, currentPrice);
     const hasEngulfingBeforeClose = scanEngulfingBeforeClose.patterns.some((p) => p.name === 'Bullish Engulfing' && p.candleIndex === baseClosedCandles.length);
     assert(!hasEngulfingBeforeClose, '1.4 Forming candle matching Bullish Engulfing is NOT detected before candle close');
+
+    // 1.5 Forming candle matching Shooting Star shape is NOT detected before close
+    const formingShootingStar: Candle = {
+      openTime: now - 30000,
+      closeTime: now + 870000,
+      open: currentPrice,
+      high: currentPrice + 700, // Upper wick rejection
+      low: currentPrice - 10,
+      close: currentPrice - 5,
+      volume: 3500
+    };
+    const scanShootingStarBeforeClose = runChartScan('BTCUSDT', '15m', [...baseClosedCandles, formingShootingStar], dummyVol, dummyMS, currentPrice);
+    const hasShootingStarBeforeClose = scanShootingStarBeforeClose.patterns.some((p) => p.name.includes('Shooting Star') && p.candleIndex === baseClosedCandles.length);
+    assert(!hasShootingStarBeforeClose, '1.5 Forming candle matching Shooting Star is NOT detected before candle close');
+
+    // 1.6 Forming candle matching Doji shape is NOT detected before close
+    const formingDoji: Candle = {
+      openTime: now - 30000,
+      closeTime: now + 870000,
+      open: currentPrice,
+      high: currentPrice + 400,
+      low: currentPrice - 400,
+      close: currentPrice, // Exact open=close
+      volume: 2000
+    };
+    const scanDojiBeforeClose = runChartScan('BTCUSDT', '15m', [...baseClosedCandles, formingDoji], dummyVol, dummyMS, currentPrice);
+    const hasDojiBeforeClose = scanDojiBeforeClose.patterns.some((p) => p.name.includes('Doji') && p.candleIndex === baseClosedCandles.length);
+    assert(!hasDojiBeforeClose, '1.6 Forming candle matching Doji is NOT detected before candle close');
+
+    // 1.7 Future candle with openTime > now is strictly discarded
+    const futureCandle: Candle = {
+      openTime: now + 60000,
+      closeTime: now + 960000,
+      open: currentPrice,
+      high: currentPrice + 100,
+      low: currentPrice - 100,
+      close: currentPrice + 50,
+      volume: 1000
+    };
+    const scanFutureCandle = runChartScan('BTCUSDT', '15m', [...baseClosedCandles, futureCandle], dummyVol, dummyMS, currentPrice);
+    assert(scanFutureCandle.confirmedCandleCloseTime === baseClosedCandles[baseClosedCandles.length - 1].closeTime, '1.7 Future candle with openTime in the future is strictly discarded');
+
+    // 1.8 Candle with isClosed: false or estimated price is strictly discarded
+    const unclosedExplicitCandle: Candle = {
+      openTime: now - 30000,
+      closeTime: now + 870000,
+      open: currentPrice,
+      high: currentPrice + 200,
+      low: currentPrice - 200,
+      close: currentPrice + 100,
+      volume: 1500,
+      ...( { isClosed: false, isEstimated: true } as any)
+    };
+    const scanUnclosedExplicit = runChartScan('BTCUSDT', '15m', [...baseClosedCandles, unclosedExplicitCandle], dummyVol, dummyMS, currentPrice);
+    assert(!scanUnclosedExplicit.patterns.some((p) => p.candleIndex === baseClosedCandles.length), '1.8 Unclosed candle data or estimated price is never detected or displayed');
   }
 
   // ---------------------------------------------------------------------------
@@ -228,6 +283,57 @@ async function runAll12Tests() {
     assert(
       confirmedEngulfing?.priceLevel === closedEngulfingCandle.close,
       '2.4 Formation priceLevel matches confirmed closed candle price (84250)'
+    );
+
+    // 2.5 Confirmed Hammer candle (distinct real body > 12% and <= 40% of range, lower wick >= 2x body and >= 55% range)
+    const closedHammerCandle: Candle = {
+      openTime: now - 15 * 60 * 1000,
+      closeTime: now - 1, // CONFIRMED CLOSED
+      open: 83850,
+      high: 84050,
+      low: 83450, // Range 600, body 200 (33.3%), lower wick 400 (66.7%), upper wick 0
+      close: 84050,
+      volume: 2200
+    };
+    const hammerScan = runChartScan('BTCUSDT', '15m', [...baseClosedCandles.slice(0, 16), closedHammerCandle], testVol, testMS, 84050);
+    const confirmedHammer = hammerScan.patterns.find((p) => p.name === 'Hammer (Bullish Pin Bar)');
+    assert(
+      confirmedHammer !== undefined && confirmedHammer.confirmedCandleCloseTime === closedHammerCandle.closeTime,
+      '2.5 Hammer formation confirmed ONLY after candle close with exact pattern name'
+    );
+
+    // 2.6 Confirmed Shooting Star candle (distinct real body > 12% and <= 40% of range, upper wick >= 2x body and >= 55% range)
+    const closedShootingStarCandle: Candle = {
+      openTime: now - 15 * 60 * 1000,
+      closeTime: now - 1, // CONFIRMED CLOSED
+      open: 84050,
+      high: 84450, // Range 600, body 200 (33.3%), upper wick 400 (66.7%), lower wick 0
+      low: 83850,
+      close: 83850,
+      volume: 2200
+    };
+    const shootingStarScan = runChartScan('BTCUSDT', '15m', [...baseClosedCandles.slice(0, 16), closedShootingStarCandle], testVol, testMS, 83850);
+    const confirmedShootingStar = shootingStarScan.patterns.find((p) => p.name === 'Shooting Star (Bearish Pin Bar)');
+    assert(
+      confirmedShootingStar !== undefined && confirmedShootingStar.confirmedCandleCloseTime === closedShootingStarCandle.closeTime,
+      '2.6 Shooting Star formation confirmed ONLY after candle close with exact pattern name'
+    );
+
+    // 2.7 Confirmed Dragonfly Doji candle
+    const closedDragonflyCandle: Candle = {
+      openTime: now - 15 * 60 * 1000,
+      closeTime: now - 1, // CONFIRMED CLOSED
+      open: 84000,
+      high: 84010,
+      low: 83200, // Lower wick 800 out of 810 range (> 65%), upper wick 10 (< 15%)
+      close: 84000,
+      volume: 1800
+    };
+    const dragonflyScan = runChartScan('BTCUSDT', '15m', [...baseClosedCandles.slice(0, 16), closedDragonflyCandle], testVol, testMS, 84000);
+    const confirmedDragonfly = dragonflyScan.patterns.find((p) => p.name === 'Dragonfly Doji');
+    assert(
+      confirmedDragonfly !== undefined && confirmedDragonfly.confirmedCandleCloseTime === closedDragonflyCandle.closeTime,
+      '2.7 Dragonfly Doji formation confirmed ONLY after candle close with exact pattern name'
     );
   }
 

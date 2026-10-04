@@ -128,7 +128,9 @@ export function evaluateSignalsWithTicker(
   let changed = false;
 
   const updatedSignals = signals.map((s) => {
-    if (s.asset !== symbol || s.status !== 'ACTIVE') {
+    // Continue evaluating if ACTIVE or if trade reached TP #1 but has not finished tracking for TP #2
+    const isMonitoring = s.status === 'ACTIVE' || (s.status === 'WIN' && s.tp1Hit && !s.isTradeComplete);
+    if (s.asset !== symbol || !isMonitoring) {
       return s;
     }
 
@@ -136,38 +138,136 @@ export function evaluateSignalsWithTicker(
     const highest = Math.max(s.highestReached || currentPrice, currentPrice);
     const lowest = Math.min(s.lowestReached || currentPrice, currentPrice);
 
-    // 1. Evaluate touch on TP or SL using the accurate touch engine
+    // 1. Evaluate touch on TP #1, TP #2, or SL using the accurate touch engine
     const touch = checkSignalTouch(s, currentPrice, candles);
 
     if (touch.isTouched && touch.touchedLevel) {
       changed = true;
-      addClearedSignalId(s.id); // Permanently remove both TP and SL lines
-
-      const isWin = touch.touchedLevel === 'TP';
-      const exitPrice = touch.touchPrice;
       const isUp = s.direction === 'UP';
+      const exitPrice = touch.touchPrice;
       const pnlRaw = isUp
         ? ((exitPrice - s.entryPrice) / s.entryPrice) * 100
         : ((s.entryPrice - exitPrice) / s.entryPrice) * 100;
 
-      return {
-        ...s,
-        status: isWin ? ('WIN' as const) : ('LOSS' as const),
-        statusReason: touch.reason,
-        completedAt: touch.touchTimestamp || now,
-        exitPrice,
-        pnlPercent: isWin ? Math.abs(pnlRaw) : -Math.abs(pnlRaw),
-        highestReached: highest,
-        lowestReached: lowest
-      };
+      // Case A: TP #2 reached (trade complete)
+      if (touch.touchedLevel === 'TP2') {
+        addClearedSignalId(s.id); // Permanently remove trade lines
+        return {
+          ...s,
+          tp1Hit: true,
+          tp2Hit: true,
+          tp2HitTimestamp: touch.touchTimestamp || now,
+          tp2Price: exitPrice,
+          isTradeComplete: true,
+          status: 'WIN' as const,
+          displayMessage: 'tp #2 hit | trade complete',
+          statusReason: 'tp #2 hit | trade complete',
+          completedAt: touch.touchTimestamp || now,
+          exitPrice,
+          pnlPercent: Math.abs(pnlRaw),
+          highestReached: highest,
+          lowestReached: lowest
+        };
+      }
+
+      // Case B: TP #1 reached (immediately counts as WIN, trade continues tracking TP2)
+      if (touch.touchedLevel === 'TP1' || touch.touchedLevel === 'TP') {
+        const rr = s.rewardRiskRatio || (Math.abs(exitPrice - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1));
+        const rrStr = rr.toFixed(2);
+        const msg = `tp #1 hit | r:r ${rrStr} | win`;
+
+        if (touch.isTradeComplete) {
+          addClearedSignalId(s.id);
+        }
+
+        return {
+          ...s,
+          tp1Hit: true,
+          tp1HitTimestamp: touch.touchTimestamp || now,
+          tp1Price: exitPrice,
+          status: 'WIN' as const,
+          displayMessage: msg,
+          statusReason: msg,
+          exitPrice,
+          pnlPercent: Math.abs(pnlRaw),
+          isTradeComplete: !!touch.isTradeComplete,
+          highestReached: highest,
+          lowestReached: lowest
+        };
+      }
+
+      // Case C: SL touched
+      if (touch.touchedLevel === 'SL') {
+        addClearedSignalId(s.id);
+        // If TP #1 was already secured, trade REMAINS A WIN!
+        if (s.tp1Hit) {
+          const rr = s.rewardRiskRatio || (Math.abs((s.tp1Price || s.takeProfit) - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1));
+          const rrStr = rr.toFixed(2);
+          return {
+            ...s,
+            isTradeComplete: true,
+            status: 'WIN' as const,
+            displayMessage: `tp #1 hit | r:r ${rrStr} | win`,
+            statusReason: `tp #1 hit | r:r ${rrStr} | win (reversal to SL)`,
+            completedAt: touch.touchTimestamp || now,
+            exitPrice,
+            highestReached: highest,
+            lowestReached: lowest
+          };
+        }
+
+        // SL hit before TP1 -> LOSS
+        return {
+          ...s,
+          isTradeComplete: true,
+          status: 'LOSS' as const,
+          statusReason: touch.reason,
+          completedAt: touch.touchTimestamp || now,
+          exitPrice,
+          pnlPercent: -Math.abs(pnlRaw),
+          highestReached: highest,
+          lowestReached: lowest
+        };
+      }
+
+      // Case D: BOTH touched simultaneously in same period -> conservative LOSS
+      if (touch.touchedLevel === 'BOTH') {
+        addClearedSignalId(s.id);
+        return {
+          ...s,
+          isTradeComplete: true,
+          status: 'LOSS' as const,
+          statusReason: touch.reason,
+          completedAt: touch.touchTimestamp || now,
+          exitPrice,
+          pnlPercent: -Math.abs(pnlRaw),
+          highestReached: highest,
+          lowestReached: lowest
+        };
+      }
     }
 
     // 2. Check Expiry
     if (now >= s.expiryTimestamp) {
       changed = true;
       addClearedSignalId(s.id); // Remove lines upon expiry
+      // If TP1 was already hit, keep as WIN upon expiry!
+      if (s.tp1Hit) {
+        return {
+          ...s,
+          isTradeComplete: true,
+          status: 'WIN' as const,
+          statusReason: `Trade completed: Expired after TP #1 secured`,
+          completedAt: now,
+          exitPrice: currentPrice,
+          highestReached: highest,
+          lowestReached: lowest
+        };
+      }
+
       return {
         ...s,
+        isTradeComplete: true,
         status: 'EXPIRED' as const,
         statusReason: `Expired after ${s.expiryCandles} candle periods without reaching TP or SL.`,
         completedAt: now,
@@ -207,18 +307,32 @@ export function settleSignalOutcome(
     const now = Date.now();
 
     const updated = signals.map((s) => {
-      if (s.id === signalId && s.status === 'ACTIVE') {
+      if (s.id === signalId && (s.status === 'ACTIVE' || (s.status === 'WIN' && !s.isTradeComplete))) {
         changed = true;
-        const isWin = outcome === 'WIN';
+        // If TP #1 was already secured, trade permanently REMAINS A WIN even if price hits SL later!
+        const finalStatus: 'WIN' | 'LOSS' | 'EXPIRED' = (s.tp1Hit || s.status === 'WIN') ? 'WIN' : outcome;
+        const isWin = finalStatus === 'WIN';
         const pnl = s.direction === 'UP'
           ? ((exitPrice - s.entryPrice) / s.entryPrice) * 100
           : ((s.entryPrice - exitPrice) / s.entryPrice) * 100;
 
+        const isTp1 = outcome === 'WIN' && !s.tp1Hit && !reason.includes('tp #2');
+        const isTp2 = outcome === 'WIN' && (reason.includes('tp #2') || s.tp1Hit);
+        const isTradeComplete = isTp2 || outcome === 'LOSS' || outcome === 'EXPIRED' || (s.tp1Hit && reason.includes('reversal'));
+
         return {
           ...s,
-          status: outcome,
+          status: finalStatus,
           statusReason: reason,
-          completedAt: now,
+          displayMessage: reason,
+          tp1Hit: s.tp1Hit || isTp1 || isTp2,
+          tp1HitTimestamp: s.tp1HitTimestamp || (isTp1 ? now : undefined),
+          tp1Price: s.tp1Price || (isTp1 ? exitPrice : undefined),
+          tp2Hit: s.tp2Hit || isTp2,
+          tp2HitTimestamp: s.tp2HitTimestamp || (isTp2 ? now : undefined),
+          tp2Price: s.tp2Price || (isTp2 ? exitPrice : undefined),
+          isTradeComplete: s.isTradeComplete || isTradeComplete,
+          completedAt: isTradeComplete ? (s.completedAt || now) : s.completedAt,
           exitPrice,
           pnlPercent: isWin ? Math.abs(pnl) : -Math.abs(pnl),
           highestReached: Math.max(s.highestReached || exitPrice, exitPrice),
@@ -230,7 +344,9 @@ export function settleSignalOutcome(
 
     if (changed) {
       saveStoredSignals(updated);
-      addClearedSignalId(signalId);
+      if (updated.some((s) => s.id === signalId && s.isTradeComplete)) {
+        addClearedSignalId(signalId);
+      }
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('nwwt_signal_settled', { detail: { signalId, outcome } }));
       }

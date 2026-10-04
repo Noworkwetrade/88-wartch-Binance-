@@ -140,7 +140,9 @@ class ScannerService {
   }) {
     const entryPrice = closePrice;
     let stopLoss = invalidationLevel;
-    let takeProfit = entryPrice;
+    let takeProfit1 = entryPrice;
+    let takeProfit2 = entryPrice;
+    let rewardRiskRatio = 1.50;
 
     const tfMins = getTimeframeMinutes(timeframe);
     const expiryCandles = 24;
@@ -151,14 +153,19 @@ class ScannerService {
         stopLoss = entryPrice * 0.985; // 1.5% default stop
       }
       const risk = entryPrice - stopLoss;
-      takeProfit = entryPrice + risk * 1.5; // 1.5R target
+      takeProfit1 = entryPrice + risk * 1.5; // TP #1: 1.5R target
+      takeProfit2 = entryPrice + risk * 2.5; // TP #2: 2.5R target
+      rewardRiskRatio = parseFloat((risk > 0 ? (takeProfit1 - entryPrice) / risk : 1.50).toFixed(2));
     } else {
       if (!stopLoss || stopLoss <= entryPrice || (stopLoss - entryPrice) / entryPrice < 0.004) {
         stopLoss = entryPrice * 1.015; // 1.5% default stop
       }
       const risk = stopLoss - entryPrice;
-      takeProfit = entryPrice - risk * 1.5; // 1.5R target
+      takeProfit1 = entryPrice - risk * 1.5; // TP #1: 1.5R target
+      takeProfit2 = entryPrice - risk * 2.5; // TP #2: 2.5R target
+      rewardRiskRatio = parseFloat((risk > 0 ? (entryPrice - takeProfit1) / risk : 1.50).toFixed(2));
     }
+    const takeProfit = takeProfit1; // Preserves exact existing take profit calculation
 
     const typePrefix = modelType === 'original' ? '' : `-${modelType}`;
     const confirmedTime = confirmedCandleCloseTime || timestamp;
@@ -173,14 +180,21 @@ class ScannerService {
       signalPrice: entryPrice,
       entryPrice,
       takeProfit,
+      takeProfit1,
+      takeProfit2,
       stopLoss,
       invalidationLevel: stopLoss,
+      rewardRiskRatio,
       confidence,
       reason,
       timestamp,
       confirmedCandleCloseTime: confirmedTime,
+      tp1Hit: false,
+      tp2Hit: false,
+      isTradeComplete: false,
       status: 'ACTIVE',
       statusReason: 'Watching live prices against TP and SL',
+      displayMessage: '',
       expiryCandles,
       expiryTimestamp,
       highestReached: entryPrice,
@@ -194,13 +208,14 @@ class ScannerService {
 
   /**
    * Live Market Data Watcher for Active Signals across all 4 research models
+   * Automatically monitors TP #1, TP #2, and SL in real-time background
    */
   watchActiveSignals() {
     const now = Date.now();
     let hasChanges = false;
 
     for (const [id, signal] of this.performanceSignals.entries()) {
-      if (signal.status !== 'ACTIVE') continue;
+      if (signal.isTradeComplete || signal.status === 'LOSS' || signal.status === 'EXPIRED') continue;
 
       const ticker = marketCache.getTicker(signal.asset);
       if (!ticker || ticker.lastPrice === '--') continue;
@@ -212,82 +227,191 @@ class ScannerService {
       signal.lowestReached = Math.min(signal.lowestReached || currentPrice, currentPrice);
 
       const isUp = signal.direction === 'UP';
+      const tp1 = signal.takeProfit1 || signal.takeProfit;
+      const risk = Math.abs(signal.entryPrice - signal.stopLoss);
+      const tp2 = signal.takeProfit2 || (isUp ? signal.entryPrice + risk * 2.5 : signal.entryPrice - risk * 2.5);
+      const sl = signal.stopLoss;
+      const rrStr = (signal.rewardRiskRatio || 1.50).toFixed(2);
 
       if (isUp) {
-        // CONSERVATIVE RULE: If both TP and SL touched in same period, use conservative SL result
-        const tpReached = currentPrice >= signal.takeProfit;
-        const slReached = currentPrice <= signal.stopLoss;
+        if (signal.tp1Hit) {
+          // TP1 already hit: monitoring for TP2 or reversal
+          const tp2Reached = currentPrice >= tp2;
+          const slReached = currentPrice <= sl;
 
-        if (tpReached && slReached) {
-          signal.status = 'LOSS';
-          signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = signal.stopLoss;
-          signal.pnlPercent = -Math.abs(((signal.entryPrice - signal.stopLoss) / signal.entryPrice) * 100);
-          hasChanges = true;
-        } else if (tpReached) {
-          signal.status = 'WIN';
-          signal.statusReason = `Take profit target ($${signal.takeProfit.toFixed(4)}) reached.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = signal.takeProfit;
-          signal.pnlPercent = Math.abs(((signal.takeProfit - signal.entryPrice) / signal.entryPrice) * 100);
-          hasChanges = true;
-        } else if (slReached) {
-          signal.status = 'LOSS';
-          signal.statusReason = `Stop loss level ($${signal.stopLoss.toFixed(4)}) reached.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = signal.stopLoss;
-          signal.pnlPercent = -Math.abs(((signal.entryPrice - signal.stopLoss) / signal.entryPrice) * 100);
-          hasChanges = true;
-        } else if (now >= signal.expiryTimestamp) {
-          signal.status = 'EXPIRED';
-          signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = currentPrice;
-          signal.pnlPercent = ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100;
-          hasChanges = true;
+          if (tp2Reached) {
+            signal.tp2Hit = true;
+            signal.tp2HitTimestamp = now;
+            signal.tp2Price = tp2;
+            signal.isTradeComplete = true;
+            signal.status = 'WIN';
+            signal.displayMessage = 'tp #2 hit | trade complete';
+            signal.statusReason = 'tp #2 hit | trade complete';
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = tp2;
+            signal.pnlPercent = Math.abs(((tp2 - signal.entryPrice) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (slReached) {
+            // Reversal after TP1 secured: permanently remains a WIN!
+            signal.isTradeComplete = true;
+            signal.status = 'WIN';
+            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win (reversal to SL)`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = sl;
+            hasChanges = true;
+          }
+        } else {
+          // TP1 has not yet been hit
+          const tp2Reached = currentPrice >= tp2;
+          const tp1Reached = currentPrice >= tp1;
+          const slReached = currentPrice <= sl;
+
+          if (tp1Reached && slReached) {
+            signal.status = 'LOSS';
+            signal.isTradeComplete = true;
+            signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = sl;
+            signal.pnlPercent = -Math.abs(((signal.entryPrice - sl) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (tp2Reached) {
+            signal.tp1Hit = true;
+            signal.tp1HitTimestamp = now;
+            signal.tp1Price = tp1;
+            signal.tp2Hit = true;
+            signal.tp2HitTimestamp = now;
+            signal.tp2Price = tp2;
+            signal.isTradeComplete = true;
+            signal.status = 'WIN';
+            signal.displayMessage = 'tp #2 hit | trade complete';
+            signal.statusReason = 'tp #2 hit | trade complete';
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = tp2;
+            signal.pnlPercent = Math.abs(((tp2 - signal.entryPrice) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (tp1Reached) {
+            signal.tp1Hit = true;
+            signal.tp1HitTimestamp = now;
+            signal.tp1Price = tp1;
+            signal.status = 'WIN';
+            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.exitPrice = tp1;
+            signal.pnlPercent = Math.abs(((tp1 - signal.entryPrice) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (slReached) {
+            signal.status = 'LOSS';
+            signal.isTradeComplete = true;
+            signal.statusReason = `Stop loss level ($${sl.toFixed(4)}) reached.`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = sl;
+            signal.pnlPercent = -Math.abs(((signal.entryPrice - sl) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (now >= signal.expiryTimestamp) {
+            signal.status = 'EXPIRED';
+            signal.isTradeComplete = true;
+            signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = currentPrice;
+            signal.pnlPercent = ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100;
+            hasChanges = true;
+          }
         }
       } else {
         // DOWN Direction
-        const tpReached = currentPrice <= signal.takeProfit;
-        const slReached = currentPrice >= signal.stopLoss;
+        if (signal.tp1Hit) {
+          const tp2Reached = currentPrice <= tp2;
+          const slReached = currentPrice >= sl;
 
-        if (tpReached && slReached) {
-          signal.status = 'LOSS';
-          signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = signal.stopLoss;
-          signal.pnlPercent = -Math.abs(((signal.stopLoss - signal.entryPrice) / signal.entryPrice) * 100);
-          hasChanges = true;
-        } else if (tpReached) {
-          signal.status = 'WIN';
-          signal.statusReason = `Take profit target ($${signal.takeProfit.toFixed(4)}) reached.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = signal.takeProfit;
-          signal.pnlPercent = Math.abs(((signal.entryPrice - signal.takeProfit) / signal.entryPrice) * 100);
-          hasChanges = true;
-        } else if (slReached) {
-          signal.status = 'LOSS';
-          signal.statusReason = `Stop loss level ($${signal.stopLoss.toFixed(4)}) reached.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = signal.stopLoss;
-          signal.pnlPercent = -Math.abs(((signal.stopLoss - signal.entryPrice) / signal.entryPrice) * 100);
-          hasChanges = true;
-        } else if (now >= signal.expiryTimestamp) {
-          signal.status = 'EXPIRED';
-          signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
-          signal.completedAt = now;
-          signal.durationMs = now - signal.timestamp;
-          signal.exitPrice = currentPrice;
-          signal.pnlPercent = ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
-          hasChanges = true;
+          if (tp2Reached) {
+            signal.tp2Hit = true;
+            signal.tp2HitTimestamp = now;
+            signal.tp2Price = tp2;
+            signal.isTradeComplete = true;
+            signal.status = 'WIN';
+            signal.displayMessage = 'tp #2 hit | trade complete';
+            signal.statusReason = 'tp #2 hit | trade complete';
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = tp2;
+            signal.pnlPercent = Math.abs(((signal.entryPrice - tp2) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (slReached) {
+            signal.isTradeComplete = true;
+            signal.status = 'WIN';
+            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win (reversal to SL)`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = sl;
+            hasChanges = true;
+          }
+        } else {
+          const tp2Reached = currentPrice <= tp2;
+          const tp1Reached = currentPrice <= tp1;
+          const slReached = currentPrice >= sl;
+
+          if (tp1Reached && slReached) {
+            signal.status = 'LOSS';
+            signal.isTradeComplete = true;
+            signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = sl;
+            signal.pnlPercent = -Math.abs(((sl - signal.entryPrice) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (tp2Reached) {
+            signal.tp1Hit = true;
+            signal.tp1HitTimestamp = now;
+            signal.tp1Price = tp1;
+            signal.tp2Hit = true;
+            signal.tp2HitTimestamp = now;
+            signal.tp2Price = tp2;
+            signal.isTradeComplete = true;
+            signal.status = 'WIN';
+            signal.displayMessage = 'tp #2 hit | trade complete';
+            signal.statusReason = 'tp #2 hit | trade complete';
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = tp2;
+            signal.pnlPercent = Math.abs(((signal.entryPrice - tp2) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (tp1Reached) {
+            signal.tp1Hit = true;
+            signal.tp1HitTimestamp = now;
+            signal.tp1Price = tp1;
+            signal.status = 'WIN';
+            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.exitPrice = tp1;
+            signal.pnlPercent = Math.abs(((signal.entryPrice - tp1) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (slReached) {
+            signal.status = 'LOSS';
+            signal.isTradeComplete = true;
+            signal.statusReason = `Stop loss level ($${sl.toFixed(4)}) reached.`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = sl;
+            signal.pnlPercent = -Math.abs(((sl - signal.entryPrice) / signal.entryPrice) * 100);
+            hasChanges = true;
+          } else if (now >= signal.expiryTimestamp) {
+            signal.status = 'EXPIRED';
+            signal.isTradeComplete = true;
+            signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
+            signal.exitPrice = currentPrice;
+            signal.pnlPercent = ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+            hasChanges = true;
+          }
         }
       }
     }
@@ -335,10 +459,14 @@ class ScannerService {
 
           // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
           // Never generate or display a signal while the current candlestick is still forming.
-          // Discard any unfinished candle whose closeTime > now or openTime + duration > now.
+          // Discard any unfinished candle whose closeTime > now or openTime + duration > now,
+          // as well as future candles, estimated prices, or unclosed flags.
           const tfDuration = (getTimeframeMinutes(timeframe) || 15) * 60 * 1000;
           const closedCandles = (rawCandles || []).filter((c) => {
             if (!c || isNaN(c.close) || c.close <= 0) return false;
+            if (c.isClosed === false) return false;
+            if (c.isEstimated || c.estimated) return false;
+            if (c.openTime > now) return false;
             const effectiveCloseTime = c.closeTime || (c.openTime + tfDuration - 1);
             if (effectiveCloseTime > now) return false;
             if (c.openTime + tfDuration > now) return false;
@@ -506,10 +634,14 @@ class ScannerService {
   analyzeCandles(symbol, timeframe, rawCandles, currentPrice) {
     const now = Date.now();
     // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
-    // Discard any forming candle whose closeTime > now or openTime + duration > now.
+    // Discard any forming candle whose closeTime > now or openTime + duration > now,
+    // as well as future candles, estimated prices, or unclosed flags.
     const tfDuration = (getTimeframeMinutes(timeframe) || 15) * 60 * 1000;
     const closedCandles = (rawCandles || []).filter((c) => {
       if (!c || isNaN(c.close) || c.close <= 0) return false;
+      if (c.isClosed === false) return false;
+      if (c.isEstimated || c.estimated) return false;
+      if (c.openTime > now) return false;
       const effectiveCloseTime = c.closeTime || (c.openTime + tfDuration - 1);
       if (effectiveCloseTime > now) return false;
       if (c.openTime + tfDuration > now) return false;

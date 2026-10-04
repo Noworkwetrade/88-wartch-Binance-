@@ -43,6 +43,9 @@ export function runChartScan(
   // Discard any unfinished candle data, future candles, or estimated closing prices.
   const closedCandles = (candles || []).filter((c) => {
     if (!c || isNaN(c.close) || c.close <= 0) return false;
+    if ((c as any).isClosed === false) return false;
+    if ((c as any).isEstimated || (c as any).estimated) return false;
+    if (c.openTime > now) return false;
     const effectiveCloseTime = c.closeTime || (c.openTime + tfDuration - 1);
     // Candle is still forming if its close time is in the future
     if (effectiveCloseTime > now) return false;

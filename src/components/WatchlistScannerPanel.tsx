@@ -482,8 +482,8 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                         </div>
                       </div>
 
-                      {/* Target Levels Display: Confirmed Entry, TP, SL */}
-                      <div className="mt-2.5 p-2 rounded bg-[#0a0c12] border border-[#1e2130] grid grid-cols-3 gap-2 text-center font-mono">
+                      {/* Target Levels Display: Confirmed Entry, TP #1, TP #2, SL */}
+                      <div className="mt-2.5 p-2 rounded bg-[#0a0c12] border border-[#1e2130] grid grid-cols-2 sm:grid-cols-4 gap-2 text-center font-mono">
                         <div>
                           <div className="text-[10px] text-slate-500 uppercase">Confirmed Entry</div>
                           <div className="text-xs font-bold text-white">
@@ -491,9 +491,21 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                           </div>
                         </div>
                         <div>
-                          <div className="text-[10px] text-emerald-400 uppercase font-semibold">Take Profit (TP)</div>
+                          <div className="text-[10px] text-emerald-400 uppercase font-semibold flex items-center justify-center gap-1">
+                            <span>TP #1</span>
+                            {latestActiveSignal.tp1Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded">HIT</span>}
+                          </div>
                           <div className="text-xs font-bold text-emerald-400">
-                            ${formatPrice(latestActiveSignal.takeProfit)}
+                            ${formatPrice(latestActiveSignal.takeProfit1 || latestActiveSignal.takeProfit)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-emerald-400 uppercase font-semibold flex items-center justify-center gap-1">
+                            <span>TP #2</span>
+                            {latestActiveSignal.tp2Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded">HIT</span>}
+                          </div>
+                          <div className="text-xs font-bold text-emerald-400">
+                            ${formatPrice(latestActiveSignal.takeProfit2 || (latestActiveSignal.direction === 'UP' ? (latestActiveSignal.entryPrice + Math.abs(latestActiveSignal.entryPrice - latestActiveSignal.stopLoss) * 2.5) : (latestActiveSignal.entryPrice - Math.abs(latestActiveSignal.entryPrice - latestActiveSignal.stopLoss) * 2.5)))}
                           </div>
                         </div>
                         <div>
@@ -503,6 +515,13 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                           </div>
                         </div>
                       </div>
+
+                      {latestActiveSignal.displayMessage && (
+                        <div className="mt-2 px-2.5 py-1 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-mono font-bold flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>{latestActiveSignal.displayMessage}</span>
+                        </div>
+                      )}
 
                       <p className="text-xs text-slate-300 mt-2 leading-relaxed">
                         {latestActiveSignal.reason}
@@ -607,21 +626,40 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                               </div>
                             </div>
 
-                            {/* Three-Column Price Grid: Entry, TP, SL */}
-                            <div className="mt-2 p-1.5 rounded bg-[#08090d] border border-[#161822] grid grid-cols-3 gap-1 text-center font-mono text-[11px]">
+                            {/* Four-Column Price Grid: Entry, TP #1, TP #2, SL */}
+                            <div className="mt-2 p-1.5 rounded bg-[#08090d] border border-[#161822] grid grid-cols-2 sm:grid-cols-4 gap-1 text-center font-mono text-[11px]">
                               <div>
-                                <span className="text-[9px] text-slate-500 block">CONFIRMED ENTRY</span>
+                                <span className="text-[9px] text-slate-500 block">ENTRY</span>
                                 <span className="font-semibold text-white">${formatPrice(s.entryPrice || s.signalPrice)}</span>
                               </div>
                               <div>
-                                <span className="text-[9px] text-emerald-400 block font-semibold">TAKE PROFIT</span>
-                                <span className="font-semibold text-emerald-400">${formatPrice(s.takeProfit)}</span>
+                                <span className="text-[9px] text-emerald-400 block font-semibold flex items-center justify-center gap-0.5">
+                                  <span>TP #1</span>
+                                  {s.tp1Hit && <span className="text-[8px] bg-emerald-500/20 text-emerald-300 px-0.5 rounded">HIT</span>}
+                                </span>
+                                <span className="font-semibold text-emerald-400">${formatPrice(s.takeProfit1 || s.takeProfit)}</span>
+                              </div>
+                              <div>
+                                <span className="text-[9px] text-emerald-400 block font-semibold flex items-center justify-center gap-0.5">
+                                  <span>TP #2</span>
+                                  {s.tp2Hit && <span className="text-[8px] bg-emerald-500/20 text-emerald-300 px-0.5 rounded">HIT</span>}
+                                </span>
+                                <span className="font-semibold text-emerald-400">
+                                  ${formatPrice(s.takeProfit2 || (s.direction === 'UP' ? (s.entryPrice + Math.abs(s.entryPrice - s.stopLoss) * 2.5) : (s.entryPrice - Math.abs(s.entryPrice - s.stopLoss) * 2.5)))}
+                                </span>
                               </div>
                               <div>
                                 <span className="text-[9px] text-rose-400 block font-semibold">STOP LOSS</span>
                                 <span className="font-semibold text-rose-400">${formatPrice(s.stopLoss)}</span>
                               </div>
                             </div>
+
+                            {s.displayMessage && (
+                              <div className="mt-1.5 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-mono font-bold flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3 shrink-0" />
+                                <span>{s.displayMessage}</span>
+                              </div>
+                            )}
 
                             <p className="text-[11px] text-slate-300 mt-1.5 line-clamp-2 leading-relaxed">
                               {s.reason}

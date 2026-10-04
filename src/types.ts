@@ -148,12 +148,24 @@ export interface ScannerSignalItem {
   signalPrice: number;
   entryPrice: number;
   takeProfit: number;
+  takeProfit1?: number;
+  takeProfit2?: number;
   stopLoss: number;
   invalidationLevel: number;
   confidence: number;
   reason: string;
   timestamp: number;
   confirmedCandleCloseTime?: number;
+  // Two Take Profit & Trade Completion Fields
+  tp1Hit?: boolean;
+  tp1HitTimestamp?: number;
+  tp1Price?: number;
+  tp2Hit?: boolean;
+  tp2HitTimestamp?: number;
+  tp2Price?: number;
+  rewardRiskRatio?: number;
+  displayMessage?: string;
+  isTradeComplete?: boolean;
   // Performance Engine Fields
   status: SignalStatus;
   statusReason?: string;
