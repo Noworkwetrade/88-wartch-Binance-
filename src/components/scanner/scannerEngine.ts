@@ -16,6 +16,7 @@
 
 import { Candle, Timeframe, MarketStructureResult, SwingPoint, StructureBreak } from '../../types.ts';
 import { getTimeframeDurationMs } from '../../utils/marketStructure.ts';
+import { evaluateMarketStructureQuality, isPermanentlyExcludedSymbol } from '../../utils/marketStructureQuality.ts';
 import {
   ScannerPattern,
   ScannerAnalysisResult,
@@ -35,6 +36,37 @@ export function runChartScan(
   currentPrice: number
 ): ScannerAnalysisResult {
   const now = Date.now();
+
+  // STRICT PERMANENT EXCLUSION: USDCUSDT and USD1USDT must never be analyzed or scanned
+  if (isPermanentlyExcludedSymbol(asset)) {
+    const excludedDecision: ScannerDecision = {
+      signal: 'NO SETUP',
+      setupQuality: 'NONE',
+      marketCondition: 'ranging or neutral',
+      marketStructure: 'Permanently Excluded Asset',
+      trendCondition: 'Unknown',
+      volumeCondition: 'Excluded asset',
+      keyPriceArea: `Current: $${currentPrice.toFixed(2)}`,
+      reason: `${asset} is permanently excluded from opportunity scanning.`,
+      invalidationLevel: currentPrice
+    };
+    return {
+      asset,
+      timeframe,
+      currentPrice,
+      decision: excludedDecision,
+      patterns: [],
+      primaryPattern: null,
+      overallConfidence: 0,
+      trendConfluence: 'neutral',
+      supportLevel: currentPrice * 0.98,
+      resistanceLevel: currentPrice * 1.02,
+      volumeStatus: 'average',
+      educationalSummary: `${asset} is permanently excluded from opportunity scanning.`,
+      scannedAt: now
+    };
+  }
+
   const tfDuration = getTimeframeDurationMs(timeframe);
 
   // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
@@ -84,6 +116,13 @@ export function runChartScan(
       scannedAt: now
     };
   }
+
+  // =========================================================================
+  // MARKET STRUCTURE QUALITY LAYER (Pre-Strategy Filter)
+  // Evaluates whether current chart structure is readable and tradable
+  // BEFORE any strategy rules, trade entries, or trade signals run.
+  // =========================================================================
+  const qualityResult = evaluateMarketStructureQuality(asset, timeframe, closedCandles, currentPrice);
 
   // ==========================================
   // 1. VOLUME & PRICE-VOLUME RELATIONSHIP
@@ -470,9 +509,10 @@ export function runChartScan(
   let invalidationLevel = currentPrice;
   let keyPriceArea = '';
 
-  const swingHighCount = marketStructure.swingPoints.filter((s) => s.isHigh).length;
-  const swingLowCount = marketStructure.swingPoints.filter((s) => !s.isHigh).length;
-  const marketStructureSummary = `${marketStructure.currentTrend.toUpperCase()} (${swingHighCount} Highs, ${swingLowCount} Lows${lastBreak ? `, ${lastBreak.type} at $${lastBreak.breakPrice.toFixed(2)}` : ''})`;
+  const swingHighCount = (marketStructure?.swingPoints || []).filter((s) => s.isHigh).length;
+  const swingLowCount = (marketStructure?.swingPoints || []).filter((s) => !s.isHigh).length;
+  const currentTrendStr = (marketStructure?.currentTrend || (marketStructure as any)?.marketStructure || 'ranging').toString();
+  const marketStructureSummary = `${currentTrendStr.toUpperCase()} (${swingHighCount} Highs, ${swingLowCount} Lows${lastBreak ? `, ${lastBreak.type} at $${lastBreak.breakPrice.toFixed(2)}` : ''})`;
 
   const trendConditionSummary =
     marketCondition === 'trending bullish'
@@ -484,10 +524,22 @@ export function runChartScan(
   const hasBullishPattern = primaryPattern && primaryPattern.bias === 'bullish';
   const hasBearishPattern = primaryPattern && primaryPattern.bias === 'bearish';
 
+  // =========================================================================
+  // MARKET STRUCTURE QUALITY LAYER GATE
+  // If the chart does not have usable, readable market structure,
+  // the trading strategy must NEVER run for that asset.
+  // =========================================================================
+  if (!qualityResult.isTradable) {
+    signal = 'NO SETUP';
+    setupQuality = 'NONE';
+    keyPriceArea = `Current: $${currentPrice.toFixed(2)}`;
+    reason = `Market Structure Quality Filter: ${qualityResult.rejectionReason}`;
+    invalidationLevel = currentPrice;
+  }
   // ----------------------------------------------------
-  // REGIME 1: TRENDING BULLISH
+  // REGIME 1: TRENDING BULLISH (Strategy runs ONLY if quality passed)
   // ----------------------------------------------------
-  if (marketCondition === 'trending bullish') {
+  else if (marketCondition === 'trending bullish') {
     // Conflict Check 1: Fatal overhead ceiling
     if (distToResistancePct < 0.005 && !isFreshBullishBreakout) {
       signal = 'NO SETUP';
@@ -711,7 +763,9 @@ export function runChartScan(
       : 62;
 
   // Educational narrative
-  const educationalSummary = `Decision: ${signal} (${setupQuality} Quality) on ${asset} (${timeframe}) at $${currentPrice.toFixed(2)}. Market condition: ${marketCondition}. ${reason} Invalidation level: $${invalidationLevel.toFixed(2)}. Analysis strictly for educational purposes based on OHLCV confluence. Not financial advice.`;
+  const educationalSummary = !qualityResult.isTradable
+    ? `Market Structure Quality Rejection on ${asset} (${timeframe}): ${qualityResult.rejectionReason} Asset filtered before strategy evaluation.`
+    : `Decision: ${signal} (${setupQuality} Quality) on ${asset} (${timeframe}) at $${currentPrice.toFixed(2)}. Market condition: ${marketCondition}. ${reason} Invalidation level: $${invalidationLevel.toFixed(2)}. Analysis strictly for educational purposes based on OHLCV confluence. Not financial advice.`;
 
   return {
     asset,
@@ -727,6 +781,7 @@ export function runChartScan(
     volumeStatus,
     educationalSummary,
     confirmedCandleCloseTime: c0.closeTime,
+    qualityResult,
     scannedAt: now
   };
 }

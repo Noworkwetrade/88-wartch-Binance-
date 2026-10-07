@@ -164,6 +164,24 @@ export interface ScannerSignalItem {
   tp2HitTimestamp?: number;
   tp2Price?: number;
   rewardRiskRatio?: number;
+  riskDistance?: number;
+  targetDistance?: number;
+  structureReference?: {
+    swingLow: number;
+    swingHigh: number;
+    supportLevel: number;
+    resistanceLevel: number;
+    buffer: number;
+    atr: number;
+    invalidationType: string;
+    tp1TargetType: string;
+    tp2TargetType?: string;
+    riskDistance: number;
+    targetDistance: number;
+    timeframe: string;
+    pair: string;
+  };
+  isBacktest?: boolean;
   displayMessage?: string;
   isTradeComplete?: boolean;
   // Performance Engine Fields
@@ -188,6 +206,25 @@ export interface ScannerSignalItem {
   durationMs?: number;
   maxDrawdownPercent?: number;
   signalConditions?: SignalConditionsRecord;
+  marketStructureQuality?: {
+    qualityGrade: 'excellent' | 'good' | 'acceptable' | 'poor' | 'untradable';
+    qualityScore: number;
+    isTradable: boolean;
+    rejectionReason?: string;
+    metrics: {
+      candleActivity: number;
+      relativePriceMovement: number;
+      swingClarity: number;
+      srClarity: number;
+      volumeActivity?: number;
+      averageCandleRangePercent: number;
+      totalWindowRangePercent: number;
+      swingCount: number;
+      swingSeparationPercent: number;
+      flatCandleRatio: number;
+      overlapRatio: number;
+    };
+  };
 }
 
 export interface PendingRetestItem {
@@ -244,6 +281,25 @@ export interface WalkForwardMetrics {
   message: string;
 }
 
+export interface LivePerformanceSummary {
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  profitFactor: number;
+  expectancy: number;
+  drawdown: number;
+  sampleSize: number;
+}
+
+export interface BacktestPerformanceSummary {
+  trades: number;
+  winRate: number;
+  profitFactor: number;
+  drawdown: number;
+  sampleSize: number;
+}
+
 export interface SignalPerformanceStats {
   totalSignals: number;
   activeCount: number;
@@ -260,6 +316,8 @@ export interface SignalPerformanceStats {
   drawdown?: number;
   sampleSize?: number;
   hasSufficientSample?: boolean;
+  liveStats?: LivePerformanceSummary;
+  backtestStats?: BacktestPerformanceSummary;
   bySetupType: Record<string, SetupPerformance>;
   byTimeframe: Record<string, SetupPerformance>;
   byDirection: Record<'UP' | 'DOWN', SetupPerformance>;

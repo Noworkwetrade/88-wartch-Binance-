@@ -721,7 +721,7 @@ async function runAll12Tests() {
 
     // TP touch
     const tpTouch = checkSignalTouch(longSig, 87050);
-    assert(tpTouch.isTouched && tpTouch.touchedLevel === 'TP', '12.1 Long TP touch detection works accurately');
+    assert(tpTouch.isTouched && (tpTouch.touchedLevel === 'TP' || tpTouch.touchedLevel === 'TP1'), '12.1 Long TP touch detection works accurately');
 
     // SL touch
     const slTouch = checkSignalTouch(longSig, 83950);

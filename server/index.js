@@ -12,7 +12,7 @@ import { symbolManager } from './symbolManager.js';
 import { binanceSocket } from './binanceSocket.js';
 import { marketCache } from './marketCache.js';
 import { clientSocket } from './clientSocket.js';
-import { fetchKlines } from './binanceRest.js';
+import { fetchKlines, isPermanentlyExcludedSymbol } from './binanceRest.js';
 import { scannerService } from './scannerService.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -67,6 +67,9 @@ app.get('/api/tickers', (req, res) => {
 
 app.get('/api/ticker/:symbol', (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
+  if (isPermanentlyExcludedSymbol(symbol)) {
+    return res.status(404).json({ error: `Symbol ${symbol} is permanently excluded` });
+  }
   const ticker = marketCache.getTicker(symbol);
   if (!ticker) {
     return res.status(404).json({ error: `Symbol ${symbol} not found in market cache` });
@@ -78,6 +81,17 @@ app.get('/api/klines', async (req, res) => {
   const symbol = (req.query.symbol || 'BTCUSDT').toString().toUpperCase();
   const interval = (req.query.interval || '15m').toString();
   const limit = parseInt(req.query.limit || '200', 10);
+
+  if (isPermanentlyExcludedSymbol(symbol)) {
+    return res.json({
+      symbol,
+      interval,
+      count: 0,
+      candles: [],
+      hasData: false,
+      message: `${symbol} is permanently excluded`
+    });
+  }
 
   try {
     const candles = await fetchKlines(symbol, interval, limit);
@@ -107,6 +121,13 @@ app.get('/api/scanner', (req, res) => {
 
 app.get('/api/scanner/performance', (req, res) => {
   res.json(scannerService.computePerformanceStats());
+});
+
+app.get('/api/scanner/diagnostics', (req, res) => {
+  res.json({
+    diagnostics: scannerService.getQualityDiagnostics(),
+    count: scannerService.qualityDiagnostics.size
+  });
 });
 
 app.post('/api/scanner/scan-asset', async (req, res) => {

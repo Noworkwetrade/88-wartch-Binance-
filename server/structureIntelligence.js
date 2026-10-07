@@ -418,8 +418,13 @@ export function createInverseSignal(originalSignal) {
     signalPrice: entryPrice,
     entryPrice,
     takeProfit: inverseTakeProfit,
+    takeProfit1: inverseTakeProfit,
+    takeProfit2: undefined,
     stopLoss: inverseStopLoss,
     invalidationLevel: inverseStopLoss,
+    rewardRiskRatio: 1.5,
+    riskDistance: originalRisk,
+    targetDistance: originalRisk * 1.5,
     modelType: 'inverse',
     reason: `Inverse Research Setup: Testing counter-hypothesis to ${originalSignal.direction} (${originalSignal.setupType}).`
   };

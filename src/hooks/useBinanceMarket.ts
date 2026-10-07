@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { TickerData, ConnectionStatus, ConnectionPoolStats, ScannerState, Timeframe } from '../types.ts';
+import { isPermanentlyExcludedSymbol } from '../utils/marketStructureQuality.ts';
 
 export function useBinanceMarket() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
@@ -56,7 +57,7 @@ export function useBinanceMarket() {
 
   // Process a single ticker update item from Binance feed
   const processTickerItem = useCallback((t: Partial<TickerData> & { symbol: string }) => {
-    if (!t || !t.symbol) return;
+    if (!t || !t.symbol || isPermanentlyExcludedSymbol(t.symbol)) return;
     tickCounterRef.current++;
     setLastTickTime(t.lastUpdateTime || Date.now());
 
@@ -124,16 +125,26 @@ export function useBinanceMarket() {
             if (data.status) setConnectionStatus(data.status);
             if (data.connections) setPoolStats(data.connections);
             if (data.totalSymbols) setTotalSymbols(data.totalSymbols);
-            if (data.scanner) setScannerState(data.scanner);
+            if (data.scanner) {
+              setScannerState({
+                ...data.scanner,
+                signals: (data.scanner.signals || []).filter((s: any) => !isPermanentlyExcludedSymbol(s.asset) && s.modelType !== 'inverse' && s.modelType !== 'ai_filtered_inverse'),
+                completedSignals: (data.scanner.completedSignals || []).filter((s: any) => !isPermanentlyExcludedSymbol(s.asset) && s.modelType !== 'inverse' && s.modelType !== 'ai_filtered_inverse'),
+                pendingRetests: (data.scanner.pendingRetests || []).filter((p: any) => !isPermanentlyExcludedSymbol(p.asset))
+              });
+            }
 
             if (Array.isArray(data.tickers)) {
               for (const t of data.tickers) {
+                if (!t || !t.symbol || isPermanentlyExcludedSymbol(t.symbol)) continue;
                 const existing = tickersMapRef.current.get(t.symbol);
                 tickersMapRef.current.set(t.symbol, {
                   ...(existing || {}),
                   ...t
                 });
               }
+              tickersMapRef.current.delete('USDCUSDT');
+              tickersMapRef.current.delete('USD1USDT');
               dirtyRef.current = true;
               flushUpdates();
             }
@@ -147,7 +158,12 @@ export function useBinanceMarket() {
             processTickerItem(msg.data);
           } else if (msg.type === 'scanner_update') {
             if (msg.data) {
-              setScannerState(msg.data);
+              setScannerState({
+                ...msg.data,
+                signals: (msg.data.signals || []).filter((s: any) => !isPermanentlyExcludedSymbol(s.asset) && s.modelType !== 'inverse' && s.modelType !== 'ai_filtered_inverse'),
+                completedSignals: (msg.data.completedSignals || []).filter((s: any) => !isPermanentlyExcludedSymbol(s.asset) && s.modelType !== 'inverse' && s.modelType !== 'ai_filtered_inverse'),
+                pendingRetests: (msg.data.pendingRetests || []).filter((p: any) => !isPermanentlyExcludedSymbol(p.asset))
+              });
             }
           } else if (msg.type === 'status') {
             const data = msg.data;

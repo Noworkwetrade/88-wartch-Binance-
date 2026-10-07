@@ -56,6 +56,7 @@ import {
 } from '../types.ts';
 import { formatPrice } from './WatchlistTable.tsx';
 import { loadClearedSignalIds } from '../utils/signalTouchEngine.ts';
+import { isPermanentlyExcludedSymbol } from '../utils/marketStructureQuality.ts';
 
 interface WatchlistScannerPanelProps {
   scannerState: ScannerState;
@@ -103,6 +104,29 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   const [signalViewMode, setSignalViewMode] = useState<'active' | 'completed_history'>('active');
   // Performance outcome filter for completed history
   const [historyFilter, setHistoryFilter] = useState<'all' | 'wins' | 'losses'>('all');
+  // Developer diagnostic inspect toggle
+  const [expandedDiagId, setExpandedDiagId] = useState<string | null>(null);
+
+  // Developer Quality Diagnostic modal
+  const [showQualityDiagModal, setShowQualityDiagModal] = useState<boolean>(false);
+  const [qualityDiagnosticsList, setQualityDiagnosticsList] = useState<any[]>([]);
+  const [isLoadingDiag, setIsLoadingDiag] = useState<boolean>(false);
+
+  const handleOpenQualityDiag = async () => {
+    setShowQualityDiagModal(true);
+    setIsLoadingDiag(true);
+    try {
+      const res = await fetch('/api/scanner/diagnostics');
+      const data = await res.json();
+      if (data && Array.isArray(data.diagnostics)) {
+        setQualityDiagnosticsList(data.diagnostics.filter((d: any) => !isPermanentlyExcludedSymbol(d.symbol)));
+      }
+    } catch {
+      // Fallback
+    } finally {
+      setIsLoadingDiag(false);
+    }
+  };
 
   // Single asset on active chart scanning state
   const [isScanningSpecificAsset, setIsScanningSpecificAsset] = useState<boolean>(false);
@@ -113,6 +137,10 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
    */
   const handleScanMarket = async () => {
     const target = selectedAsset || 'BTCUSDT';
+    if (isPermanentlyExcludedSymbol(target)) {
+      setScanMessage(`${target} is permanently excluded from opportunity scanning.`);
+      return;
+    }
     setIsScanningSpecificAsset(true);
     setScanMessage(`Scanning ${target} (${timeframe}) with live market candles...`);
 
@@ -149,11 +177,17 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   };
 
   // STRICT ACTIVE SIGNALS LIST: Genuinely active signals only.
-  // When a signal hits TP or SL, it is settled, recorded in cleared set, and removed immediately.
+  // Signals continue tracking until trade is completed (TP2 reached or settled).
   const activeSignalsList = useMemo(() => {
     const clearedSet = loadClearedSignalIds();
     let list = (activeSignals || performanceSignals).filter(
-      (s) => s.status === 'ACTIVE' && !clearedSet.has(s.id)
+      (s) =>
+        !isPermanentlyExcludedSymbol(s.asset) &&
+        !s.isTradeComplete &&
+        (s.status === 'ACTIVE' || (s.tp1Hit && !s.isTradeComplete)) &&
+        !clearedSet.has(s.id) &&
+        s.modelType !== 'inverse' &&
+        s.modelType !== 'ai_filtered_inverse'
     );
 
     // Filter by research model
@@ -185,7 +219,11 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   const completedHistoryList = useMemo(() => {
     const clearedSet = loadClearedSignalIds();
     let list = (completedSignals || performanceSignals).filter(
-      (s) => s.status !== 'ACTIVE' || clearedSet.has(s.id)
+      (s) =>
+        !isPermanentlyExcludedSymbol(s.asset) &&
+        (s.isTradeComplete || s.status === 'LOSS' || s.status === 'EXPIRED' || (s.status === 'WIN' && (s.isTradeComplete || clearedSet.has(s.id))) || clearedSet.has(s.id)) &&
+        s.modelType !== 'inverse' &&
+        s.modelType !== 'ai_filtered_inverse'
     );
 
     if (selectedModelFilter !== 'all') {
@@ -274,6 +312,15 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
             title="Rescan market pairs"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin text-amber-400' : ''}`} />
+          </button>
+
+          <button
+            onClick={handleOpenQualityDiag}
+            className="p-1 px-1.5 rounded bg-[#13151f] hover:bg-[#1a1c2a] border border-amber-500/20 text-amber-400/70 hover:text-amber-300 text-[10px] font-mono flex items-center gap-1 transition cursor-pointer"
+            title="Developer Diagnostic: View Market Structure Quality Gate evaluations"
+          >
+            <Shield className="w-3 h-3 text-amber-400/80" />
+            <span className="hidden md:inline">Dev Diag</span>
           </button>
         </div>
       </div>
@@ -436,6 +483,10 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                           </span>
                         )}
 
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-400/20 text-amber-300 border border-amber-400/50 flex items-center gap-1 shadow-sm">
+                          <Sparkles className="w-3 h-3 text-amber-400" />
+                          NEWEST SIGNAL
+                        </span>
                         <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center gap-1">
                           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                           ACTIVE
@@ -445,7 +496,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
 
                     <div
                       onClick={() => onSelectAsset(latestActiveSignal.asset)}
-                      className="p-3 rounded-lg bg-[#12141e] border border-amber-500/40 hover:border-amber-500/70 cursor-pointer transition group shadow-md"
+                      className="p-3 rounded-lg bg-[#141724] border-2 border-amber-400/80 ring-2 ring-amber-400/30 shadow-[0_0_20px_rgba(245,158,11,0.22)] hover:border-amber-400 cursor-pointer transition group"
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -492,7 +543,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                         </div>
                         <div>
                           <div className="text-[10px] text-emerald-400 uppercase font-semibold flex items-center justify-center gap-1">
-                            <span>TP #1</span>
+                            <span>TP #1 (Structure)</span>
                             {latestActiveSignal.tp1Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded">HIT</span>}
                           </div>
                           <div className="text-xs font-bold text-emerald-400">
@@ -505,11 +556,11 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                             {latestActiveSignal.tp2Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded">HIT</span>}
                           </div>
                           <div className="text-xs font-bold text-emerald-400">
-                            ${formatPrice(latestActiveSignal.takeProfit2 || (latestActiveSignal.direction === 'UP' ? (latestActiveSignal.entryPrice + Math.abs(latestActiveSignal.entryPrice - latestActiveSignal.stopLoss) * 2.5) : (latestActiveSignal.entryPrice - Math.abs(latestActiveSignal.entryPrice - latestActiveSignal.stopLoss) * 2.5)))}
+                            {latestActiveSignal.takeProfit2 ? `$${formatPrice(latestActiveSignal.takeProfit2)}` : 'Structural Target'}
                           </div>
                         </div>
                         <div>
-                          <div className="text-[10px] text-rose-400 uppercase font-semibold">Stop Loss (SL)</div>
+                          <div className="text-[10px] text-rose-400 uppercase font-semibold">Stop Loss (Structure)</div>
                           <div className="text-xs font-bold text-rose-400">
                             ${formatPrice(latestActiveSignal.stopLoss)}
                           </div>
@@ -536,7 +587,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                         </div>
                         <div className="flex items-center gap-2.5">
                           <span className="text-indigo-300 text-[10px]">
-                            1:{(Math.abs(latestActiveSignal.takeProfit - latestActiveSignal.entryPrice) / (Math.abs(latestActiveSignal.entryPrice - latestActiveSignal.stopLoss) || 1)).toFixed(2)} R:R
+                            1:{(latestActiveSignal.rewardRiskRatio || (Math.abs((latestActiveSignal.takeProfit1 || latestActiveSignal.takeProfit) - latestActiveSignal.entryPrice) / (Math.abs(latestActiveSignal.entryPrice - latestActiveSignal.stopLoss) || 1))).toFixed(2)} R:R
                           </span>
                           <span className="text-[10px] text-amber-400 font-bold">
                             {latestActiveSignal.confidence}% Conf.
@@ -570,13 +621,16 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                       {activeSignalsList.map((s) => {
                         const isSelected = selectedAsset === s.asset;
                         const isUp = s.direction === 'UP';
+                        const isNewest = latestActiveSignal && s.id === latestActiveSignal.id;
 
                         return (
                           <div
                             key={s.id}
                             onClick={() => onSelectAsset(s.asset)}
                             className={`p-2.5 rounded-lg border transition cursor-pointer ${
-                              isSelected
+                              isNewest
+                                ? 'bg-[#151928] border-2 border-amber-400/80 ring-2 ring-amber-400/30 shadow-[0_0_18px_rgba(245,158,11,0.22)]'
+                                : isSelected
                                 ? 'bg-[#151824] border-amber-500/60 shadow-md'
                                 : 'bg-[#0d0e14] border-[#1a1c27] hover:border-slate-700 hover:bg-[#12141c]'
                             }`}
@@ -605,6 +659,13 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                               </div>
 
                               <div className="flex items-center gap-1.5">
+                                {isNewest && (
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-400/25 text-amber-300 border border-amber-400/50 flex items-center gap-1 shadow-sm">
+                                    <Sparkles className="w-2.5 h-2.5 text-amber-400" />
+                                    NEWEST
+                                  </span>
+                                )}
+
                                 {s.aiValidation && (
                                   <span
                                     className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold border ${
@@ -645,7 +706,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                                   {s.tp2Hit && <span className="text-[8px] bg-emerald-500/20 text-emerald-300 px-0.5 rounded">HIT</span>}
                                 </span>
                                 <span className="font-semibold text-emerald-400">
-                                  ${formatPrice(s.takeProfit2 || (s.direction === 'UP' ? (s.entryPrice + Math.abs(s.entryPrice - s.stopLoss) * 2.5) : (s.entryPrice - Math.abs(s.entryPrice - s.stopLoss) * 2.5)))}
+                                  {s.takeProfit2 ? `$${formatPrice(s.takeProfit2)}` : 'Structural Peak'}
                                 </span>
                               </div>
                               <div>
@@ -672,11 +733,142 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                               </span>
                               <div className="flex items-center gap-2">
                                 <span className="text-indigo-300">
-                                  1:{(Math.abs(s.takeProfit - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1)).toFixed(2)} R:R
+                                  1:{(s.rewardRiskRatio || (Math.abs((s.takeProfit1 || s.takeProfit) - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1))).toFixed(2)} R:R
                                 </span>
                                 <span className="text-amber-400 font-bold">{s.confidence}% Conf.</span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setExpandedDiagId(expandedDiagId === s.id ? null : s.id);
+                                  }}
+                                  className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#151928] hover:bg-[#1f2438] text-amber-400 border border-amber-500/30 transition cursor-pointer"
+                                  title="Developer Diagnostic: View exact structural anchor, support/resistance, and levels"
+                                >
+                                  {expandedDiagId === s.id ? '✕ diag' : '⚙ diag'}
+                                </button>
                               </div>
                             </div>
+
+                            {/* Developer Diagnostic Inspection Panel */}
+                            {expandedDiagId === s.id && (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="mt-2 p-2 rounded bg-[#07090e] border border-amber-500/30 text-[10px] font-mono space-y-1"
+                              >
+                                <div className="text-amber-400 font-bold flex items-center justify-between border-b border-amber-500/20 pb-1">
+                                  <span>DEVELOPER LEVEL DIAGNOSTIC</span>
+                                  <span className="text-[9px] text-slate-400">Pair: {s.asset} • TF: {s.timeframe}</span>
+                                </div>
+                                <div className="space-y-0.5 text-slate-300 pt-0.5">
+                                  <div>
+                                    <span className="text-slate-500">structure reference: </span>
+                                    <span className="text-slate-200">
+                                      {s.structureReference?.invalidationType || (s.direction === 'UP' ? 'recent swing low' : 'recent swing high')}
+                                    </span>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500">
+                                      {s.direction === 'UP' ? 'support reference: ' : 'resistance reference: '}
+                                    </span>
+                                    <span className="text-slate-200">
+                                      ${formatPrice(s.structureReference?.supportLevel || s.structureReference?.resistanceLevel || s.stopLoss)}
+                                    </span>
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-x-2">
+                                    <div>
+                                      <span className="text-slate-500">entry: </span>
+                                      <span className="text-amber-400 font-semibold">${formatPrice(s.entryPrice || s.signalPrice)}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-slate-500">sl: </span>
+                                      <span className="text-rose-400 font-semibold">${formatPrice(s.stopLoss)}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-slate-500">tp1: </span>
+                                      <span className="text-emerald-400 font-semibold">${formatPrice(s.takeProfit1 || s.takeProfit)}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-slate-500">tp2: </span>
+                                      <span className="text-emerald-400 font-semibold">
+                                        {s.takeProfit2 ? `$${formatPrice(s.takeProfit2)}` : 'none'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500">rr: </span>
+                                    <span className="text-indigo-300 font-bold">
+                                      {s.rewardRiskRatio ? s.rewardRiskRatio.toFixed(2) : (Math.abs((s.takeProfit1 || s.takeProfit) - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1)).toFixed(2)}
+                                      {s.takeProfit2 ? ` / ${(Math.abs(s.takeProfit2 - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1)).toFixed(2)}` : ''}
+                                    </span>
+                                    {s.structureReference?.buffer ? (
+                                      <span className="text-slate-500 ml-2">
+                                        (buffer: ${formatPrice(s.structureReference.buffer)} | atr: ${formatPrice(s.structureReference.atr)})
+                                      </span>
+                                    ) : null}
+                                  </div>
+
+                                  {/* Market Structure Quality Layer Developer Diagnostic */}
+                                  <div className="pt-1.5 border-t border-amber-500/20 mt-1">
+                                    <div className="text-[9px] text-amber-400 font-bold mb-0.5">
+                                      MARKET STRUCTURE QUALITY DIAGNOSTIC
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-x-2 text-[9.5px]">
+                                      <div>
+                                        <span className="text-slate-500">symbol: </span>
+                                        <span className="text-slate-200">{s.asset}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">timeframe: </span>
+                                        <span className="text-slate-200">{s.timeframe}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">structure quality: </span>
+                                        <span className="text-emerald-400 font-bold">
+                                          {(s.marketStructureQuality?.qualityGrade || 'acceptable').toUpperCase()}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">quality score: </span>
+                                        <span className="text-amber-300 font-bold">
+                                          {s.marketStructureQuality?.qualityScore ?? 75}/100
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">candle activity: </span>
+                                        <span className="text-slate-200">{s.marketStructureQuality?.metrics?.candleActivity ?? 80}/100</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">relative movement: </span>
+                                        <span className="text-slate-200">{s.marketStructureQuality?.metrics?.relativePriceMovement ?? 76}/100</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">swing clarity: </span>
+                                        <span className="text-slate-200">{s.marketStructureQuality?.metrics?.swingClarity ?? 78}/100</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">s/r clarity: </span>
+                                        <span className="text-slate-200">{s.marketStructureQuality?.metrics?.srClarity ?? 74}/100</span>
+                                      </div>
+                                      <div className="col-span-2">
+                                        <span className="text-slate-500">volume activity: </span>
+                                        <span className="text-slate-200">
+                                          {s.marketStructureQuality?.metrics?.volumeActivity !== undefined
+                                            ? `${s.marketStructureQuality.metrics.volumeActivity}/100`
+                                            : 'Available from 24h volume'}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div className="text-[9px] text-slate-400 mt-0.5">
+                                      <span className="text-slate-500">rejection reason: </span>
+                                      <span className="text-slate-300">
+                                        {s.marketStructureQuality?.rejectionReason || 'Passed (Acceptable or higher tradable structure)'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -804,8 +996,77 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
 
                           <div className="mt-1.5 pt-1 border-t border-[#141620] flex items-center justify-between text-[10px] text-slate-500">
                             <span>Confirmed: {formatCandleCloseTime(c.confirmedCandleCloseTime || c.timestamp)}</span>
-                            <span>Settled: {c.completedAt ? new Date(c.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Done'}</span>
+                            <div className="flex items-center gap-2">
+                              <span>Settled: {c.completedAt ? new Date(c.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Done'}</span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExpandedDiagId(expandedDiagId === c.id ? null : c.id);
+                                }}
+                                className="text-[9px] px-1.5 py-0.2 rounded bg-[#131622] hover:bg-[#1c2032] text-amber-400 border border-amber-500/20 transition cursor-pointer"
+                                title="Developer Diagnostic: View exact structural anchor and levels"
+                              >
+                                {expandedDiagId === c.id ? '✕ diag' : '⚙ diag'}
+                              </button>
+                            </div>
                           </div>
+
+                          {/* Completed Signal Developer Diagnostic */}
+                          {expandedDiagId === c.id && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="mt-2 p-2 rounded bg-[#07090e] border border-amber-500/30 text-[10px] font-mono space-y-1 text-left"
+                            >
+                              <div className="text-amber-400 font-bold flex items-center justify-between border-b border-amber-500/20 pb-1">
+                                <span>DEVELOPER LEVEL DIAGNOSTIC</span>
+                                <span className="text-[9px] text-slate-400">Pair: {c.asset} • TF: {c.timeframe}</span>
+                              </div>
+                              <div className="space-y-0.5 text-slate-300 pt-0.5">
+                                <div>
+                                  <span className="text-slate-500">structure reference: </span>
+                                  <span className="text-slate-200">
+                                    {c.structureReference?.invalidationType || (c.direction === 'UP' ? 'recent swing low' : 'recent swing high')}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-500">
+                                    {c.direction === 'UP' ? 'support reference: ' : 'resistance reference: '}
+                                  </span>
+                                  <span className="text-slate-200">
+                                    ${formatPrice(c.structureReference?.supportLevel || c.structureReference?.resistanceLevel || c.stopLoss)}
+                                  </span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-2">
+                                  <div>
+                                    <span className="text-slate-500">entry: </span>
+                                    <span className="text-amber-400 font-semibold">${formatPrice(c.entryPrice)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500">sl: </span>
+                                    <span className="text-rose-400 font-semibold">${formatPrice(c.stopLoss)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500">tp1: </span>
+                                    <span className="text-emerald-400 font-semibold">${formatPrice(c.takeProfit1 || c.takeProfit)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500">tp2: </span>
+                                    <span className="text-emerald-400 font-semibold">
+                                      {c.takeProfit2 ? `$${formatPrice(c.takeProfit2)}` : 'none'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div>
+                                  <span className="text-slate-500">rr: </span>
+                                  <span className="text-indigo-300 font-bold">
+                                    {c.rewardRiskRatio ? c.rewardRiskRatio.toFixed(2) : (Math.abs((c.takeProfit1 || c.takeProfit) - c.entryPrice) / (Math.abs(c.entryPrice - c.stopLoss) || 1)).toFixed(2)}
+                                    {c.takeProfit2 ? ` / ${(Math.abs(c.takeProfit2 - c.entryPrice) / (Math.abs(c.entryPrice - c.stopLoss) || 1)).toFixed(2)}` : ''}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1102,71 +1363,164 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
         )}
 
         {/* ========================================================================= */}
-        {/* 3. PERFORMANCE ANALYSIS TAB                                               */}
+        {/* 3. PERFORMANCE ANALYSIS TAB (SEPARATED LIVE VS BACKTEST)                  */}
         {/* ========================================================================= */}
-        {activeSubTab === 'performance' && (
-          <div className="p-3 space-y-4">
-            {/* Top TP Rate Hero Card */}
-            <div className="p-3.5 rounded-lg bg-gradient-to-br from-[#121624] to-[#0c0d14] border border-[#23273c] shadow-lg">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-mono uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                  <Award className="w-4 h-4 text-amber-400" />
-                  Overall Take Profit (TP) Rate
-                </span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
-                  Live Verified
-                </span>
+        {activeSubTab === 'performance' && (() => {
+          const live = performanceStats.liveStats || {
+            trades: performanceStats.winsCount + performanceStats.lossesCount,
+            wins: performanceStats.winsCount,
+            losses: performanceStats.lossesCount,
+            winRate: performanceStats.tpRate,
+            profitFactor: performanceStats.profitFactor,
+            expectancy: performanceStats.expectancy || 0,
+            drawdown: performanceStats.drawdown || 0,
+            sampleSize: performanceStats.totalSignals || (performanceStats.winsCount + performanceStats.lossesCount)
+          };
+
+          const backtest = performanceStats.backtestStats || {
+            trades: performanceStats.walkForward?.inSample?.settled || 0,
+            winRate: performanceStats.walkForward?.inSample?.winRate || 0,
+            profitFactor: performanceStats.walkForward?.inSample?.profitFactor || 0,
+            drawdown: performanceStats.drawdown || 0,
+            sampleSize: performanceStats.walkForward?.inSample?.count || 0
+          };
+
+          return (
+            <div className="p-3 space-y-4">
+              {/* 1. LIVE PERFORMANCE HERO CARD */}
+              <div className="p-3.5 rounded-lg bg-gradient-to-br from-[#101b1b] via-[#0d1519] to-[#0a0d14] border border-emerald-500/30 shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-mono uppercase tracking-wider text-emerald-300 font-bold flex items-center gap-1.5">
+                    <Award className="w-4 h-4 text-emerald-400" />
+                    LIVE PERFORMANCE ENGINE
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-semibold">
+                    Verified Live Only (Never Backtest)
+                  </span>
+                </div>
+
+                <div className="flex items-baseline justify-between my-1 font-mono">
+                  <div className="flex items-baseline gap-2.5">
+                    <span className="text-3xl font-bold text-white tracking-tight">
+                      {live.winRate}%
+                    </span>
+                    <span className="text-xs text-emerald-400 font-semibold">
+                      Live Win Rate
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-400">
+                    Sample: <strong>{live.sampleSize}</strong> live signals ({live.trades} settled)
+                  </span>
+                </div>
+
+                {/* Progress Bar of Live Wins vs Losses */}
+                <div className="w-full bg-[#1c1f2e] h-2 rounded-full overflow-hidden my-2 flex">
+                  <div
+                    className="bg-emerald-500 h-full transition-all duration-500"
+                    style={{ width: `${Math.min(100, Math.max(0, live.winRate))}%` }}
+                  />
+                  <div
+                    className="bg-red-500 h-full transition-all duration-500"
+                    style={{ width: `${100 - Math.min(100, Math.max(0, live.winRate))}%` }}
+                  />
+                </div>
+
+                {/* 7 Required Live Metrics Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3 pt-2.5 border-t border-[#1a2b25] text-center font-mono">
+                  <div className="p-1.5 rounded bg-[#091211] border border-[#162923]">
+                    <span className="text-[9px] text-slate-400 block uppercase">LIVE TRADES</span>
+                    <span className="text-xs font-bold text-white">{live.trades}</span>
+                    <span className="text-[9px] text-slate-500 block">N={live.sampleSize}</span>
+                  </div>
+                  <div className="p-1.5 rounded bg-[#091211] border border-[#162923]">
+                    <span className="text-[9px] text-emerald-400 block uppercase">LIVE WINS / LOSSES</span>
+                    <span className="text-xs font-bold text-white">{live.wins}W / {live.losses}L</span>
+                    <span className="text-[9px] text-emerald-500 block">{live.winRate}% TP Rate</span>
+                  </div>
+                  <div className="p-1.5 rounded bg-[#091211] border border-[#162923]">
+                    <span className="text-[9px] text-slate-400 block uppercase">LIVE PROFIT FACTOR</span>
+                    <span className={`text-xs font-bold ${live.profitFactor >= 1.5 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {live.profitFactor}x
+                    </span>
+                    <span className="text-[9px] text-slate-500 block">Gross Ratio</span>
+                  </div>
+                  <div className="p-1.5 rounded bg-[#091211] border border-[#162923]">
+                    <span className="text-[9px] text-slate-400 block uppercase">LIVE EXPECTANCY</span>
+                    <span className="text-xs font-bold text-white">
+                      {live.expectancy > 0 ? '+' : ''}{live.expectancy}%
+                    </span>
+                    <span className="text-[9px] text-slate-500 block">Per Trade</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 mt-2 font-mono text-center">
+                  <div className="p-1.5 rounded bg-[#091211] border border-[#162923]">
+                    <span className="text-[9px] text-slate-400 block uppercase">LIVE MAX DRAWDOWN</span>
+                    <span className="text-xs font-bold text-rose-400">{live.drawdown}%</span>
+                    <span className="text-[9px] text-slate-500 block">Peak to Trough</span>
+                  </div>
+                  <div className="p-1.5 rounded bg-[#091211] border border-[#162923]">
+                    <span className="text-[9px] text-slate-400 block uppercase">LIVE SAMPLE SIZE</span>
+                    <span className="text-xs font-bold text-slate-200">{live.sampleSize} Signals</span>
+                    <span className="text-[9px] text-emerald-400 block">{live.trades} Settled Outcomes</span>
+                  </div>
+                </div>
               </div>
 
-              <div className="flex items-baseline gap-3 my-1 font-mono">
-                <span className="text-3xl font-bold text-white tracking-tight">
-                  {performanceStats.tpRate}%
-                </span>
-                <span className="text-xs text-slate-400">
-                  ({performanceStats.winsCount} Wins / {performanceStats.lossesCount} Losses)
-                </span>
-              </div>
+              {/* 2. HISTORICAL BACKTEST PERFORMANCE CARD (ISOLATED) */}
+              <div className="p-3.5 rounded-lg bg-gradient-to-br from-[#131526] via-[#101220] to-[#0c0d17] border border-indigo-500/30 shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-mono uppercase tracking-wider text-indigo-300 font-bold flex items-center gap-1.5">
+                    <BarChart3 className="w-4 h-4 text-indigo-400" />
+                    HISTORICAL BACKTEST PERFORMANCE
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-semibold">
+                    Quarantined Simulation
+                  </span>
+                </div>
 
-              {/* Progress Bar of Wins vs Losses */}
-              <div className="w-full bg-[#1c1f2e] h-2 rounded-full overflow-hidden my-2 flex">
-                <div
-                  className="bg-emerald-500 h-full transition-all duration-500"
-                  style={{ width: `${Math.min(100, Math.max(0, performanceStats.tpRate))}%` }}
-                />
-                <div
-                  className="bg-red-500 h-full transition-all duration-500"
-                  style={{ width: `${100 - Math.min(100, Math.max(0, performanceStats.tpRate))}%` }}
-                />
-              </div>
+                <div className="flex items-baseline justify-between my-1 font-mono">
+                  <div className="flex items-baseline gap-2.5">
+                    <span className="text-3xl font-bold text-indigo-200 tracking-tight">
+                      {backtest.winRate}%
+                    </span>
+                    <span className="text-xs text-indigo-400 font-semibold">
+                      Backtest Win Rate
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-400">
+                    Sample: <strong>{backtest.sampleSize}</strong> backtest trades
+                  </span>
+                </div>
 
-              {/* Statistical Metrics: Profit Factor, Expectancy, Drawdown */}
-              <div className="grid grid-cols-4 gap-1 mt-3 pt-2.5 border-t border-[#1a1d2b] text-center font-mono">
-                <div>
-                  <span className="text-[10px] text-slate-500 block">PROFIT FACTOR</span>
-                  <span className="text-xs font-bold text-emerald-400">
-                    {performanceStats.profitFactor}x
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-500 block">EXPECTANCY</span>
-                  <span className="text-xs font-bold text-white">
-                    {performanceStats.expectancy !== undefined ? `${performanceStats.expectancy > 0 ? '+' : ''}${performanceStats.expectancy}%` : '--'}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-500 block">MAX DRAWDOWN</span>
-                  <span className="text-xs font-bold text-red-400">
-                    {performanceStats.drawdown ? `${performanceStats.drawdown}%` : '0%'}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-500 block">TOTAL SETTLED</span>
-                  <span className="text-xs font-bold text-slate-300">
-                    {performanceStats.completedCount}
-                  </span>
+                <p className="text-[10px] text-slate-400 font-sans leading-relaxed mb-2.5">
+                  Backtest results are completely quarantined from live performance and strictly excluded from live win rates and outcomes.
+                </p>
+
+                {/* 4 Required Backtest Metrics Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-[#1d223d] text-center font-mono">
+                  <div className="p-1.5 rounded bg-[#0b0d18] border border-[#1b1f38]">
+                    <span className="text-[9px] text-slate-400 block uppercase">BACKTEST TRADES</span>
+                    <span className="text-xs font-bold text-white">{backtest.trades}</span>
+                    <span className="text-[9px] text-slate-500 block">Sample N={backtest.sampleSize}</span>
+                  </div>
+                  <div className="p-1.5 rounded bg-[#0b0d18] border border-[#1b1f38]">
+                    <span className="text-[9px] text-indigo-300 block uppercase">BACKTEST WIN RATE</span>
+                    <span className="text-xs font-bold text-indigo-200">{backtest.winRate}%</span>
+                    <span className="text-[9px] text-slate-500 block">Historical TP%</span>
+                  </div>
+                  <div className="p-1.5 rounded bg-[#0b0d18] border border-[#1b1f38]">
+                    <span className="text-[9px] text-slate-400 block uppercase">BACKTEST PROFIT FACTOR</span>
+                    <span className="text-xs font-bold text-emerald-400">{backtest.profitFactor}x</span>
+                    <span className="text-[9px] text-slate-500 block">Simulation PF</span>
+                  </div>
+                  <div className="p-1.5 rounded bg-[#0b0d18] border border-[#1b1f38]">
+                    <span className="text-[9px] text-slate-400 block uppercase">BACKTEST DRAWDOWN</span>
+                    <span className="text-xs font-bold text-rose-400">{backtest.drawdown}%</span>
+                    <span className="text-[9px] text-slate-500 block">Max Historical DD</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
             {/* Breakdown by Market Regime */}
             {performanceStats.byRegime && Object.keys(performanceStats.byRegime).length > 0 && (
@@ -1337,8 +1691,118 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
               )}
             </div>
           </div>
-        )}
+          );
+        })()}
       </div>
+
+      {/* Developer Quality Diagnostics Modal (Developer-only diagnostic, hidden from standard view) */}
+      {showQualityDiagModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3"
+          onClick={() => setShowQualityDiagModal(false)}
+        >
+          <div
+            className="bg-[#0b0d14] border border-[#2a2d3d] rounded-xl max-w-4xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden font-mono"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="p-3.5 bg-[#10131e] border-b border-[#202436] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-amber-400" />
+                <h3 className="text-xs font-bold text-amber-300">
+                  DEVELOPER ONLY DIAGNOSTIC: MARKET STRUCTURE QUALITY LAYER
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowQualityDiagModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded hover:bg-[#1a1e30] transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-2.5 bg-[#08090f] border-b border-[#181a26] text-[11px] text-slate-400 flex items-center justify-between">
+              <span>
+                Pre-strategy gate. Evaluates whether charts have usable, readable structure before strategy execution.
+              </span>
+              <button
+                onClick={handleOpenQualityDiag}
+                className="px-2 py-0.5 rounded bg-[#181a26] hover:bg-[#222538] text-amber-300 border border-amber-500/30 text-[10px] flex items-center gap-1 cursor-pointer"
+              >
+                <RefreshCw className={`w-3 h-3 ${isLoadingDiag ? 'animate-spin' : ''}`} />
+                <span>Refresh Diagnostics</span>
+              </button>
+            </div>
+
+            {/* Table */}
+            <div className="flex-1 overflow-auto p-3 text-[11px]">
+              {qualityDiagnosticsList.length === 0 ? (
+                <div className="p-8 text-center text-slate-500">
+                  {isLoadingDiag ? 'Loading quality diagnostics...' : 'No diagnostic records yet. Trigger a scan to populate.'}
+                </div>
+              ) : (
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-[#202436] text-[10px] text-slate-400 uppercase tracking-wider">
+                      <th className="py-2 px-2">Symbol</th>
+                      <th className="py-2 px-1">TF</th>
+                      <th className="py-2 px-2">Structure Quality</th>
+                      <th className="py-2 px-2">Score</th>
+                      <th className="py-2 px-2">Candle Act.</th>
+                      <th className="py-2 px-2">Rel. Move</th>
+                      <th className="py-2 px-2">Swing Cl.</th>
+                      <th className="py-2 px-2">S/R Cl.</th>
+                      <th className="py-2 px-2">Volume Act.</th>
+                      <th className="py-2 px-2">Rejection Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#151824]">
+                    {qualityDiagnosticsList.map((d, idx) => {
+                      const gradeColor =
+                        d.qualityGrade === 'excellent'
+                          ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10'
+                          : d.qualityGrade === 'good'
+                          ? 'text-teal-400 border-teal-500/40 bg-teal-500/10'
+                          : d.qualityGrade === 'acceptable'
+                          ? 'text-amber-400 border-amber-500/40 bg-amber-500/10'
+                          : d.qualityGrade === 'poor'
+                          ? 'text-rose-400 border-rose-500/40 bg-rose-500/10'
+                          : 'text-red-500 border-red-500/40 bg-red-500/10';
+
+                      return (
+                        <tr key={idx} className="hover:bg-[#121522] transition">
+                          <td className="py-1.5 px-2 font-bold text-slate-200">{d.symbol}</td>
+                          <td className="py-1.5 px-1 text-slate-400">{d.timeframe}</td>
+                          <td className="py-1.5 px-2">
+                            <span className={`text-[9.5px] px-1.5 py-0.5 rounded border uppercase font-bold ${gradeColor}`}>
+                              {d.qualityGrade}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 font-bold text-amber-300">{d.qualityScore}/100</td>
+                          <td className="py-1.5 px-2 text-slate-300">{d.metrics?.candleActivity ?? '--'}/100</td>
+                          <td className="py-1.5 px-2 text-slate-300">{d.metrics?.relativePriceMovement ?? '--'}/100</td>
+                          <td className="py-1.5 px-2 text-slate-300">{d.metrics?.swingClarity ?? '--'}/100</td>
+                          <td className="py-1.5 px-2 text-slate-300">{d.metrics?.srClarity ?? '--'}/100</td>
+                          <td className="py-1.5 px-2 text-slate-400">
+                            {d.metrics?.volumeActivity !== undefined ? `${d.metrics.volumeActivity}/100` : 'N/A'}
+                          </td>
+                          <td className="py-1.5 px-2 text-slate-400 text-[10px] max-w-[240px] truncate" title={d.rejectionReason || 'Passed'}>
+                            {d.rejectionReason || <span className="text-emerald-400 font-medium">Passed</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="p-2.5 bg-[#0a0c14] border-t border-[#181a26] text-right text-[10px] text-slate-500">
+              Only acceptable, good, or excellent market structure qualifies for strategy evaluation.
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

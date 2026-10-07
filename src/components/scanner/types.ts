@@ -1,4 +1,5 @@
 import { Candle, Timeframe, TickerData, MarketStructureResult } from '../../types.ts';
+import { MarketStructureQualityResult } from '../../utils/marketStructureQuality.ts';
 
 /**
  * ScannerVolumeData
@@ -75,6 +76,7 @@ export interface ScannerAnalysisResult {
   volumeStatus: 'expanding' | 'average' | 'contracting';
   educationalSummary: string;
   confirmedCandleCloseTime?: number;
+  qualityResult?: MarketStructureQualityResult;
   scannedAt: number;
 }
 

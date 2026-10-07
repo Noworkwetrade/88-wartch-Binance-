@@ -30,6 +30,7 @@ export const CLEARED_SIGNALS_STORAGE_KEY = 'nwwt_cleared_signal_lines';
  * Loads the persistent set of signal IDs whose lines have been cleared
  */
 export function loadClearedSignalIds(): Set<string> {
+  if (typeof localStorage === 'undefined') return new Set();
   try {
     const raw = localStorage.getItem(CLEARED_SIGNALS_STORAGE_KEY);
     if (!raw) return new Set();
@@ -45,6 +46,7 @@ export function loadClearedSignalIds(): Set<string> {
  */
 export function addClearedSignalId(signalId: string): void {
   if (!signalId) return;
+  if (typeof localStorage === 'undefined') return;
   try {
     const current = loadClearedSignalIds();
     current.add(signalId);

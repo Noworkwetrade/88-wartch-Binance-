@@ -3,7 +3,7 @@
  * Dynamically loads all active Binance Spot USDT trading pairs
  */
 
-import { fetchExchangeInfo, fetchSpotTickers } from './binanceRest.js';
+import { fetchExchangeInfo, fetchSpotTickers, isPermanentlyExcludedSymbol } from './binanceRest.js';
 import { marketCache } from './marketCache.js';
 
 class SymbolManager {
@@ -30,6 +30,7 @@ class SymbolManager {
       this.symbolMetaMap.clear();
 
       for (const item of this.rawSymbols) {
+        if (!item || isPermanentlyExcludedSymbol(item.symbol)) continue;
         this.symbolNames.push(item.symbol);
         this.symbolMetaMap.set(item.symbol, {
           symbol: item.symbol,
@@ -95,6 +96,7 @@ class SymbolManager {
   }
 
   getMeta(symbol) {
+    if (!symbol || isPermanentlyExcludedSymbol(symbol)) return null;
     return this.symbolMetaMap.get(symbol?.toUpperCase()) || null;
   }
 }

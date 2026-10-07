@@ -13,8 +13,17 @@
  * - Strict non-adaptive rule: Preserves technical rules without automated strategy perturbation
  */
 
-import { ScannerSignalItem, SignalPerformanceStats, SetupPerformance, Timeframe, Candle } from '../types.ts';
+import {
+  ScannerSignalItem,
+  SignalPerformanceStats,
+  SetupPerformance,
+  Timeframe,
+  Candle,
+  LivePerformanceSummary,
+  BacktestPerformanceSummary
+} from '../types.ts';
 import { checkSignalTouch, addClearedSignalId, loadClearedSignalIds } from './signalTouchEngine.ts';
+import { isPermanentlyExcludedSymbol } from './marketStructureQuality.ts';
 
 const STORAGE_KEY = 'nwwt_v8_signal_performance';
 
@@ -23,7 +32,16 @@ export function loadStoredSignals(): ScannerSignalItem[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed)) {
+      return parsed.filter(
+        (s) =>
+          s &&
+          s.asset &&
+          !isPermanentlyExcludedSymbol(s.asset) &&
+          s.modelType !== 'inverse' &&
+          s.modelType !== 'ai_filtered_inverse'
+      );
+    }
   } catch (err) {
     console.warn('[PerformanceEngine] Error loading stored signals:', err);
   }
@@ -32,8 +50,9 @@ export function loadStoredSignals(): ScannerSignalItem[] {
 
 export function saveStoredSignals(signals: ScannerSignalItem[]): void {
   try {
-    // Keep max 400 most recent signals to prevent unbounded localStorage growth
-    const trimmed = signals.slice(-400);
+    // Keep max 400 most recent signals, permanently excluding USDCUSDT & USD1USDT
+    const sanitized = signals.filter((s) => s && s.asset && !isPermanentlyExcludedSymbol(s.asset));
+    const trimmed = sanitized.slice(-400);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
   } catch (err) {
     console.warn('[PerformanceEngine] Error saving stored signals:', err);
@@ -55,6 +74,7 @@ export function mergeScannerSignals(
   const clearedSet = loadClearedSignalIds();
 
   for (const s of existingSignals) {
+    if (!s || !s.id || isPermanentlyExcludedSymbol(s.asset)) continue;
     // If the signal was previously cleared via TP/SL touch, ensure it is not kept as ACTIVE
     if (clearedSet.has(s.id) && s.status === 'ACTIVE') {
       signalMap.set(s.id, { ...s, status: 'EXPIRED' });
@@ -64,7 +84,8 @@ export function mergeScannerSignals(
   }
 
   for (const inc of incomingSignals) {
-    if (!inc || !inc.id) continue;
+    if (!inc || !inc.id || isPermanentlyExcludedSymbol(inc.asset)) continue;
+    if (inc.modelType === 'inverse' || inc.modelType === 'ai_filtered_inverse') continue;
     const existing = signalMap.get(inc.id);
 
     // If signal ID has already been cleared, it must NEVER reappear as ACTIVE
@@ -100,9 +121,28 @@ export function mergeScannerSignals(
         highestReached: inc.entryPrice,
         lowestReached: inc.entryPrice
       });
-    } else if (existing.status === 'ACTIVE' && inc.status && inc.status !== 'ACTIVE') {
-      // Update status if server or ticker settled it to WIN / LOSS / EXPIRED
-      signalMap.set(inc.id, { ...existing, ...inc });
+    } else if (existing) {
+      // If incoming has newer completion state or tp1/tp2 hits, merge them cleanly
+      if (inc.status && inc.status !== 'ACTIVE') {
+        signalMap.set(inc.id, {
+          ...existing,
+          ...inc,
+          // If already marked as WIN from TP1, never let a subsequent SL turn it into LOSS
+          status: (existing.tp1Hit || existing.status === 'WIN') ? 'WIN' : inc.status,
+          tp1Hit: existing.tp1Hit || inc.tp1Hit,
+          tp2Hit: existing.tp2Hit || inc.tp2Hit,
+          isTradeComplete: existing.isTradeComplete || inc.isTradeComplete
+        });
+      } else if (inc.tp1Hit || inc.tp2Hit) {
+        signalMap.set(inc.id, {
+          ...existing,
+          ...inc,
+          status: 'WIN',
+          tp1Hit: existing.tp1Hit || inc.tp1Hit,
+          tp2Hit: existing.tp2Hit || inc.tp2Hit,
+          isTradeComplete: existing.isTradeComplete || inc.isTradeComplete
+        });
+      }
     }
   }
 
@@ -120,7 +160,7 @@ export function evaluateSignalsWithTicker(
   lowPriceNum?: number,
   candles?: Candle[]
 ): { updatedSignals: ScannerSignalItem[]; changed: boolean } {
-  if (isNaN(lastPriceNum) || lastPriceNum <= 0) {
+  if (isNaN(lastPriceNum) || lastPriceNum <= 0 || isPermanentlyExcludedSymbol(symbol)) {
     return { updatedSignals: signals, changed: false };
   }
 
@@ -360,6 +400,7 @@ export function settleSignalOutcome(
  * Calculates aggregated performance statistics
  */
 export function calculatePerformanceStats(signals: ScannerSignalItem[], isSubModel = false): SignalPerformanceStats {
+  const sanitizedSignals = signals.filter((s) => s && s.asset && !isPermanentlyExcludedSymbol(s.asset));
   let activeCount = 0;
   let winsCount = 0;
   let lossesCount = 0;
@@ -407,7 +448,7 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[], isSubMod
   let maxLosingStreak = 0;
   let curStreak = 0;
 
-  for (const s of signals) {
+  for (const s of sanitizedSignals) {
     const pnl = s.pnlPercent || 0;
     if (s.status === 'ACTIVE') activeCount++;
     else if (s.status === 'WIN') {
@@ -557,6 +598,101 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[], isSubMod
       }
     : undefined;
 
+  // Calculate separated Live Performance (STRICT: only verified live signals, never backtest)
+  const liveSignals = signals.filter((s) => !s.isBacktest);
+  const liveSettled = liveSignals.filter((s) => s.status === 'WIN' || s.status === 'LOSS');
+  let liveWins = 0;
+  let liveLosses = 0;
+  let liveWinPnl = 0;
+  let liveLossPnl = 0;
+  let livePeak = 0;
+  let liveEquity = 0;
+  let liveMaxDrawdown = 0;
+
+  for (const s of [...liveSettled].reverse()) {
+    const pnl = s.pnlPercent || 0;
+    if (s.status === 'WIN') {
+      liveWins++;
+      liveWinPnl += pnl;
+    } else if (s.status === 'LOSS') {
+      liveLosses++;
+      liveLossPnl += Math.abs(pnl);
+    }
+    liveEquity += pnl;
+    if (liveEquity > livePeak) livePeak = liveEquity;
+    const dd = livePeak - liveEquity;
+    if (dd > liveMaxDrawdown) liveMaxDrawdown = dd;
+  }
+  const liveTradesTotal = liveWins + liveLosses;
+  const liveWinRate = liveTradesTotal > 0 ? parseFloat(((liveWins / liveTradesTotal) * 100).toFixed(1)) : 0;
+  const livePF = liveLossPnl > 0 ? parseFloat((liveWinPnl / liveLossPnl).toFixed(2)) : liveWins > 0 ? 9.99 : 0;
+  const liveAvgW = liveWins > 0 ? liveWinPnl / liveWins : 0;
+  const liveAvgL = liveLosses > 0 ? liveLossPnl / liveLosses : 0;
+  const liveExp = liveTradesTotal > 0 ? parseFloat(((liveWins / liveTradesTotal) * liveAvgW - (liveLosses / liveTradesTotal) * liveAvgL).toFixed(2)) : 0;
+
+  const liveStats: LivePerformanceSummary = {
+    trades: liveTradesTotal,
+    wins: liveWins,
+    losses: liveLosses,
+    winRate: liveWinRate,
+    profitFactor: livePF,
+    expectancy: liveExp,
+    drawdown: parseFloat(liveMaxDrawdown.toFixed(2)),
+    sampleSize: liveSignals.length
+  };
+
+  // Calculate separated Backtest Performance (STRICT: quarantined from live stats)
+  const backtestSignals = signals.filter((s) => s.isBacktest === true);
+  let backtestTradesTotal = 0;
+  let backtestWinRate = 0;
+  let backtestProfitFactor = 0;
+  let backtestDrawdown = 0;
+  let backtestSampleSize = 0;
+
+  if (backtestSignals.length > 0) {
+    let btWins = 0;
+    let btLosses = 0;
+    let btWinPnl = 0;
+    let btLossPnl = 0;
+    let btPeak = 0;
+    let btEquity = 0;
+    let btMaxDd = 0;
+    for (const s of [...backtestSignals].reverse()) {
+      const pnl = s.pnlPercent || 0;
+      if (s.status === 'WIN') {
+        btWins++;
+        btWinPnl += pnl;
+      } else if (s.status === 'LOSS') {
+        btLosses++;
+        btLossPnl += Math.abs(pnl);
+      }
+      btEquity += pnl;
+      if (btEquity > btPeak) btPeak = btEquity;
+      const dd = btPeak - btEquity;
+      if (dd > btMaxDd) btMaxDd = dd;
+    }
+    backtestTradesTotal = btWins + btLosses;
+    backtestWinRate = backtestTradesTotal > 0 ? parseFloat(((btWins / backtestTradesTotal) * 100).toFixed(1)) : 0;
+    backtestProfitFactor = btLossPnl > 0 ? parseFloat((btWinPnl / btLossPnl).toFixed(2)) : btWins > 0 ? 9.99 : 0;
+    backtestDrawdown = parseFloat(btMaxDd.toFixed(2));
+    backtestSampleSize = backtestSignals.length;
+  } else if (walkForward && walkForward.inSample) {
+    // If no explicit backtest items, baseline in-sample training performance represents backtest benchmark
+    backtestTradesTotal = walkForward.inSample.settled;
+    backtestWinRate = walkForward.inSample.winRate;
+    backtestProfitFactor = walkForward.inSample.profitFactor;
+    backtestDrawdown = parseFloat(maxDrawdown.toFixed(2));
+    backtestSampleSize = walkForward.inSample.count;
+  }
+
+  const backtestStats: BacktestPerformanceSummary = {
+    trades: backtestTradesTotal,
+    winRate: backtestWinRate,
+    profitFactor: backtestProfitFactor,
+    drawdown: backtestDrawdown,
+    sampleSize: backtestSampleSize
+  };
+
   return {
     totalSignals: signals.length,
     activeCount,
@@ -573,6 +709,8 @@ export function calculatePerformanceStats(signals: ScannerSignalItem[], isSubMod
     drawdown: parseFloat(maxDrawdown.toFixed(2)),
     sampleSize: settledTotal,
     hasSufficientSample: settledTotal >= 10,
+    liveStats,
+    backtestStats,
     bySetupType: cleanRecord(bySetupType),
     byTimeframe: cleanRecord(byTimeframe),
     byDirection: {

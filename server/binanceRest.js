@@ -46,6 +46,13 @@ async function binanceFetch(path, options = {}) {
   throw lastError || new Error(`Failed to fetch ${path} from all Binance endpoints`);
 }
 
+const PERMANENT_EXCLUDED_SYMBOLS = new Set(['USDCUSDT', 'USD1USDT', 'USDC', 'USD1']);
+
+export function isPermanentlyExcludedSymbol(symbol) {
+  if (!symbol) return false;
+  return PERMANENT_EXCLUDED_SYMBOLS.has(symbol.trim().toUpperCase());
+}
+
 /**
  * Fetches all active Binance Spot USDT trading pairs dynamically
  * GET /api/v3/exchangeInfo
@@ -57,13 +64,14 @@ export async function fetchExchangeInfo() {
       throw new Error('Invalid exchangeInfo response from Binance');
     }
 
-    // Filter strictly to active Spot USDT trading pairs
+    // Filter strictly to active Spot USDT trading pairs, permanently excluding USDCUSDT and USD1USDT
     const usdtSymbols = data.symbols.filter((item) => {
       return (
         item &&
         item.status === 'TRADING' &&
         item.quoteAsset === 'USDT' &&
-        item.isSpotTradingAllowed !== false
+        item.isSpotTradingAllowed !== false &&
+        !isPermanentlyExcludedSymbol(item.symbol)
       );
     });
 
@@ -87,8 +95,8 @@ export async function fetchSpotTickers() {
     const data = await binanceFetch('/api/v3/ticker/24hr');
     if (!Array.isArray(data)) return [];
 
-    // Filter only USDT pairs with valid prices
-    return data.filter((item) => item && item.symbol && item.symbol.endsWith('USDT'));
+    // Filter only USDT pairs with valid prices, permanently excluding USDCUSDT and USD1USDT
+    return data.filter((item) => item && item.symbol && item.symbol.endsWith('USDT') && !isPermanentlyExcludedSymbol(item.symbol));
   } catch (err) {
     console.warn('[binanceRest] Note fetching 24hr snapshot:', err.message);
     return [];
@@ -101,6 +109,9 @@ export async function fetchSpotTickers() {
  */
 export async function fetchKlines(symbol, interval = '15m', limit = 200) {
   const cleanSymbol = (symbol || 'BTCUSDT').toUpperCase();
+  if (isPermanentlyExcludedSymbol(cleanSymbol)) {
+    return [];
+  }
   const validLimit = Math.min(1000, Math.max(10, limit));
   const cacheKey = `${cleanSymbol}:${interval}:${validLimit}`;
   const now = Date.now();

@@ -8,6 +8,8 @@
  * - Keeps the last known valid price during reconnects
  */
 
+import { isPermanentlyExcludedSymbol } from './binanceRest.js';
+
 class MarketCache {
   constructor() {
     /** @type {Map<string, Object>} */
@@ -26,8 +28,11 @@ class MarketCache {
    * @param {Array<Object>} symbolsList
    */
   initSymbols(symbolsList) {
+    this.tickers.delete('USDCUSDT');
+    this.tickers.delete('USD1USDT');
     for (const item of symbolsList) {
       const sym = item.symbol;
+      if (!sym || isPermanentlyExcludedSymbol(sym)) continue;
       if (!this.tickers.has(sym)) {
         this.tickers.set(sym, {
           symbol: sym,
@@ -62,6 +67,10 @@ class MarketCache {
   updateFromWs(symbol, raw, eventTime = 0) {
     if (!symbol) return null;
     const cleanSymbol = symbol.toUpperCase();
+    if (isPermanentlyExcludedSymbol(cleanSymbol)) {
+      this.tickers.delete(cleanSymbol);
+      return null;
+    }
 
     // Validate price
     const rawPrice = raw.c !== undefined ? raw.c : (raw.lastPrice || raw.p);
@@ -169,7 +178,7 @@ class MarketCache {
     for (const item of rawTickersList) {
       if (!item || !item.symbol) continue;
       const cleanSymbol = item.symbol.toUpperCase();
-      if (!cleanSymbol.endsWith('USDT')) continue;
+      if (!cleanSymbol.endsWith('USDT') || isPermanentlyExcludedSymbol(cleanSymbol)) continue;
 
       const restPrice = parseFloat(item.lastPrice);
       if (isNaN(restPrice) || restPrice <= 0) continue;
@@ -230,11 +239,12 @@ class MarketCache {
   }
 
   getTicker(symbol) {
+    if (!symbol || isPermanentlyExcludedSymbol(symbol)) return null;
     return this.tickers.get(symbol?.toUpperCase()) || null;
   }
 
   getAllTickers() {
-    return Array.from(this.tickers.values());
+    return Array.from(this.tickers.values()).filter((t) => !isPermanentlyExcludedSymbol(t.symbol));
   }
 
   setConnectionStatus(status) {

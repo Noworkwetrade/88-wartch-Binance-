@@ -17,6 +17,7 @@ import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useBinanceMarket } from './hooks/useBinanceMarket.ts';
 import { useSignalPerformance } from './hooks/useSignalPerformance.ts';
 import { loadClearedSignalIds } from './utils/signalTouchEngine.ts';
+import { isPermanentlyExcludedSymbol } from './utils/marketStructureQuality.ts';
 import { Header, NavTab } from './components/Header.tsx';
 import { WatchlistToolbar } from './components/WatchlistToolbar.tsx';
 import { WatchlistTable } from './components/WatchlistTable.tsx';
@@ -71,12 +72,20 @@ export default function App() {
 
   // Selected Symbol: Default to BTCUSDT so a real chart is always active
   const [selectedSymbolName, setSelectedSymbolName] = useState<string>(() => {
-    return localStorage.getItem('nwwt_selected_symbol') || 'BTCUSDT';
+    const saved = localStorage.getItem('nwwt_selected_symbol') || 'BTCUSDT';
+    return isPermanentlyExcludedSymbol(saved) ? 'BTCUSDT' : saved;
   });
 
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
     return (localStorage.getItem('nwwt_selected_timeframe') as Timeframe) || '15m';
   });
+
+  // Ensure excluded symbols are never selected
+  useEffect(() => {
+    if (isPermanentlyExcludedSymbol(selectedSymbolName)) {
+      setSelectedSymbolName('BTCUSDT');
+    }
+  }, [selectedSymbolName]);
 
   // Sync to localStorage
   useEffect(() => {
@@ -119,7 +128,7 @@ export default function App() {
 
   // Filter & Sort tickers
   const filteredAndSortedTickers = useMemo(() => {
-    let result = tickersList;
+    let result = tickersList.filter((t) => t && t.symbol && !isPermanentlyExcludedSymbol(t.symbol));
 
     // 1. Search Query Filter
     if (searchQuery.trim()) {
@@ -193,7 +202,13 @@ export default function App() {
     if (!selectedSymbolName) return null;
     const clearedSet = loadClearedSignalIds();
     const activeList = activeSignals.filter(
-      (s) => s.asset === selectedSymbolName && s.status === 'ACTIVE' && !clearedSet.has(s.id)
+      (s) =>
+        s.asset === selectedSymbolName &&
+        !s.isTradeComplete &&
+        (s.status === 'ACTIVE' || (s.tp1Hit && !s.isTradeComplete)) &&
+        !clearedSet.has(s.id) &&
+        s.modelType !== 'inverse' &&
+        s.modelType !== 'ai_filtered_inverse'
     );
     // Prioritize AI Filtered setup if available, otherwise original
     const aiFiltered = activeList.find((s) => s.modelType === 'ai_filtered');
@@ -203,6 +218,7 @@ export default function App() {
 
   // Open asset chart on asset click (used by Watchlist & Scanner)
   const handleSelectAsset = useCallback((symbol: string) => {
+    if (isPermanentlyExcludedSymbol(symbol)) return;
     setSelectedSymbolName(symbol);
     // On mobile, automatically switch to Chart tab
     setActiveTab('chart');

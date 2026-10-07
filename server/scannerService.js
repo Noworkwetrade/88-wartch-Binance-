@@ -35,6 +35,13 @@ import {
   createInverseSignal,
   calculateWalkForwardValidation
 } from './structureIntelligence.js';
+import { calculateMarketStructureLevels } from './marketStructureLevels.js';
+import {
+  evaluateMarketStructureQuality,
+  isPermanentlyExcludedSymbol,
+  createPermanentlyExcludedResult,
+  PERMANENT_EXCLUDED_SYMBOLS
+} from './marketStructureQuality.js';
 
 // Top liquid USDT pairs prioritized for scanner depth
 const PRIORITY_SYMBOLS = [
@@ -78,6 +85,9 @@ class ScannerService {
 
     // In-Memory Performance History: Map of id -> ScannerSignalItem
     this.performanceSignals = new Map();
+
+    // In-Memory Quality Diagnostics Map: Key = `${symbol}-${timeframe}` -> MarketStructureQualityResult
+    this.qualityDiagnostics = new Map();
   }
 
   /**
@@ -120,6 +130,62 @@ class ScannerService {
   }
 
   /**
+   * Generates a fully validated trade signal anchored strictly to chart structure
+   * Rejects trade if no logical structural stop loss exists or if R:R is unfavorable.
+   */
+  generateStructuralSignal({
+    symbol,
+    timeframe,
+    direction,
+    setupType,
+    closePrice,
+    confidence,
+    reason,
+    timestamp,
+    confirmedCandleCloseTime,
+    closedCandles,
+    regimeData,
+    marketStructureQuality
+  }) {
+    const structureLevels = calculateMarketStructureLevels({
+      symbol,
+      timeframe,
+      direction,
+      entryPrice: closePrice,
+      candles: closedCandles,
+      setupType
+    });
+
+    if (!structureLevels || !structureLevels.isValid) {
+      // Rule 7: No Forced Trades - reject trade if logical stop cannot be identified or R:R is unfavorable
+      return null;
+    }
+
+    return this.createSignalItem({
+      symbol,
+      timeframe,
+      direction,
+      setupType,
+      closePrice,
+      invalidationLevel: structureLevels.stopLoss,
+      stopLoss: structureLevels.stopLoss,
+      takeProfit1: structureLevels.takeProfit1,
+      takeProfit2: structureLevels.takeProfit2,
+      rewardRiskRatio: structureLevels.rewardRiskRatio,
+      riskDistance: structureLevels.riskDistance,
+      targetDistance: structureLevels.targetDistance,
+      structureReference: structureLevels.structureReference,
+      confidence,
+      reason,
+      timestamp,
+      confirmedCandleCloseTime,
+      modelType: 'original',
+      marketRegime: regimeData.regime,
+      marketStructureQuality
+    });
+  }
+
+  /**
    * Helper to construct a Signal Item with exact entry, TP, and SL
    */
   createSignalItem({
@@ -136,36 +202,53 @@ class ScannerService {
     modelType = 'original',
     marketRegime = 'ranging',
     aiValidation = null,
-    signalConditions = null
+    signalConditions = null,
+    marketStructureQuality = null,
+    // Structure-based levels
+    stopLoss: customStopLoss,
+    takeProfit1: customTakeProfit1,
+    takeProfit2: customTakeProfit2,
+    rewardRiskRatio: customRR,
+    riskDistance: customRiskDist,
+    targetDistance: customTargetDist,
+    structureReference: customStructureRef
   }) {
     const entryPrice = closePrice;
-    let stopLoss = invalidationLevel;
-    let takeProfit1 = entryPrice;
-    let takeProfit2 = entryPrice;
-    let rewardRiskRatio = 1.50;
+    let stopLoss = customStopLoss !== undefined ? customStopLoss : invalidationLevel;
+    let takeProfit1 = customTakeProfit1;
+    let takeProfit2 = customTakeProfit2;
+    let rewardRiskRatio = customRR;
 
     const tfMins = getTimeframeMinutes(timeframe);
     const expiryCandles = 24;
     const expiryTimestamp = timestamp + expiryCandles * tfMins * 60 * 1000;
 
     if (direction === 'UP') {
-      if (!stopLoss || stopLoss >= entryPrice || (entryPrice - stopLoss) / entryPrice < 0.004) {
-        stopLoss = entryPrice * 0.985; // 1.5% default stop
+      if (stopLoss === undefined || stopLoss >= entryPrice) {
+        stopLoss = invalidationLevel && invalidationLevel < entryPrice ? invalidationLevel : entryPrice * 0.985;
       }
       const risk = entryPrice - stopLoss;
-      takeProfit1 = entryPrice + risk * 1.5; // TP #1: 1.5R target
-      takeProfit2 = entryPrice + risk * 2.5; // TP #2: 2.5R target
-      rewardRiskRatio = parseFloat((risk > 0 ? (takeProfit1 - entryPrice) / risk : 1.50).toFixed(2));
+      if (takeProfit1 === undefined) {
+        takeProfit1 = entryPrice + risk * 1.5;
+      }
+      if (rewardRiskRatio === undefined) {
+        rewardRiskRatio = parseFloat((risk > 0 ? (takeProfit1 - entryPrice) / risk : 1.0).toFixed(2));
+      }
     } else {
-      if (!stopLoss || stopLoss <= entryPrice || (stopLoss - entryPrice) / entryPrice < 0.004) {
-        stopLoss = entryPrice * 1.015; // 1.5% default stop
+      if (stopLoss === undefined || stopLoss <= entryPrice) {
+        stopLoss = invalidationLevel && invalidationLevel > entryPrice ? invalidationLevel : entryPrice * 1.015;
       }
       const risk = stopLoss - entryPrice;
-      takeProfit1 = entryPrice - risk * 1.5; // TP #1: 1.5R target
-      takeProfit2 = entryPrice - risk * 2.5; // TP #2: 2.5R target
-      rewardRiskRatio = parseFloat((risk > 0 ? (entryPrice - takeProfit1) / risk : 1.50).toFixed(2));
+      if (takeProfit1 === undefined) {
+        takeProfit1 = entryPrice - risk * 1.5;
+      }
+      if (rewardRiskRatio === undefined) {
+        rewardRiskRatio = parseFloat((risk > 0 ? (entryPrice - takeProfit1) / risk : 1.0).toFixed(2));
+      }
     }
     const takeProfit = takeProfit1; // Preserves exact existing take profit calculation
+    const riskDistance = customRiskDist !== undefined ? customRiskDist : Math.abs(entryPrice - stopLoss);
+    const targetDistance = customTargetDist !== undefined ? customTargetDist : Math.abs(takeProfit1 - entryPrice);
 
     const typePrefix = modelType === 'original' ? '' : `-${modelType}`;
     const confirmedTime = confirmedCandleCloseTime || timestamp;
@@ -185,6 +268,9 @@ class ScannerService {
       stopLoss,
       invalidationLevel: stopLoss,
       rewardRiskRatio,
+      riskDistance,
+      targetDistance,
+      structureReference: customStructureRef,
       confidence,
       reason,
       timestamp,
@@ -202,7 +288,8 @@ class ScannerService {
       modelType,
       marketRegime,
       aiValidation,
-      signalConditions
+      signalConditions,
+      marketStructureQuality
     };
   }
 
@@ -215,6 +302,12 @@ class ScannerService {
     let hasChanges = false;
 
     for (const [id, signal] of this.performanceSignals.entries()) {
+      if (isPermanentlyExcludedSymbol(signal.asset)) {
+        this.performanceSignals.delete(id);
+        hasChanges = true;
+        continue;
+      }
+
       if (signal.isTradeComplete || signal.status === 'LOSS' || signal.status === 'EXPIRED') continue;
 
       const ticker = marketCache.getTicker(signal.asset);
@@ -425,7 +518,9 @@ class ScannerService {
   }
 
   syncActiveSignalsArray() {
-    const all = Array.from(this.performanceSignals.values());
+    const all = Array.from(this.performanceSignals.values()).filter(
+      (s) => !isPermanentlyExcludedSymbol(s.asset)
+    );
     // STRICT ACTIVE SIGNALS ONLY for the scanner live stream!
     // Completed signals (WIN / LOSS / EXPIRED) are removed from active scanner immediately.
     const activeOnly = all.filter((s) => s.status === 'ACTIVE');
@@ -446,13 +541,15 @@ class ScannerService {
         .sort((a, b) => (parseFloat(b.quoteVolume) || 0) - (parseFloat(a.quoteVolume) || 0))
         .map((t) => t.symbol);
 
-      const scanList = Array.from(new Set([...PRIORITY_SYMBOLS, ...topSymbols.slice(0, 35)])).slice(0, 30);
+      const rawList = Array.from(new Set([...PRIORITY_SYMBOLS, ...topSymbols.slice(0, 35)]));
+      const scanList = rawList.filter((s) => !isPermanentlyExcludedSymbol(s)).slice(0, 30);
 
       const pendingSetups = [];
       let processed = 0;
       const now = Date.now();
 
       for (const symbol of scanList) {
+        if (isPermanentlyExcludedSymbol(symbol)) continue;
         try {
           const rawCandles = await fetchKlines(symbol, timeframe, 60);
           if (!rawCandles || rawCandles.length < 15) continue;
@@ -477,6 +574,19 @@ class ScannerService {
           const lastClosedCandle = closedCandles[closedCandles.length - 1];
           const confirmedCandleCloseTime = lastClosedCandle.closeTime;
 
+          const currentPrice = lastClosedCandle.close;
+
+          // 1. EVALUATE MARKET STRUCTURE QUALITY LAYER BEFORE STRATEGY ANALYSIS
+          const qualityResult = evaluateMarketStructureQuality(symbol, timeframe, closedCandles, currentPrice);
+          this.qualityDiagnostics.set(`${symbol}-${timeframe}`, qualityResult);
+
+          if (!qualityResult.isTradable) {
+            // Asset fails quality layer - strategy, entry, SL, TP, RR must NEVER run!
+            // Do not generate signal, do not add to performance, do not treat as loss.
+            processed++;
+            continue;
+          }
+
           // STRICT REQUIREMENT 1 & 4: Prevent duplicate signals from being generated from the same closed candle.
           // If a signal was already generated or settled from this exact closed candle, skip.
           if (this.hasSignalForCandle(symbol, timeframe, confirmedCandleCloseTime)) {
@@ -484,21 +594,13 @@ class ScannerService {
             continue;
           }
 
-          const currentPrice = lastClosedCandle.close;
           const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
 
-          // Register generated signals across models
-          if (analysis.originalSignal) {
-            this.registerSignalSafely(analysis.originalSignal);
-          }
-          if (analysis.inverseSignal) {
-            this.registerSignalSafely(analysis.inverseSignal);
-          }
-          if (analysis.aiFilteredSignal) {
-            this.registerSignalSafely(analysis.aiFilteredSignal);
-          }
-          if (analysis.aiFilteredInverseSignal) {
-            this.registerSignalSafely(analysis.aiFilteredInverseSignal);
+          // Register ONE legitimate buy or sell signal based on existing strategy and market structure logic
+          // NEVER flip into opposite direction or register inverse flipped signals
+          const signalToRegister = analysis.aiFilteredSignal || analysis.originalSignal;
+          if (signalToRegister) {
+            this.registerSignalSafely(signalToRegister);
           }
 
           if (analysis.pendingRetest) {
@@ -544,6 +646,20 @@ class ScannerService {
    */
   async scanSingleAsset(symbol, timeframe = '15m') {
     if (!symbol) return null;
+
+    // Permanently excluded assets must never receive strategy analysis
+    if (isPermanentlyExcludedSymbol(symbol)) {
+      const excludedResult = createPermanentlyExcludedResult(symbol, timeframe);
+      return {
+        asset: symbol,
+        timeframe,
+        signal: null,
+        pendingRetest: null,
+        qualityResult: excludedResult,
+        message: excludedResult.rejectionReason
+      };
+    }
+
     try {
       const rawCandles = await fetchKlines(symbol, timeframe, 60);
       if (!rawCandles || rawCandles.length < 15) {
@@ -582,10 +698,27 @@ class ScannerService {
 
       const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
 
-      if (analysis.originalSignal) this.registerSignalSafely(analysis.originalSignal);
-      if (analysis.inverseSignal) this.registerSignalSafely(analysis.inverseSignal);
-      if (analysis.aiFilteredSignal) this.registerSignalSafely(analysis.aiFilteredSignal);
-      if (analysis.aiFilteredInverseSignal) this.registerSignalSafely(analysis.aiFilteredInverseSignal);
+      if (analysis.qualityResult && !analysis.qualityResult.isTradable) {
+        return {
+          asset: symbol,
+          timeframe,
+          currentPrice,
+          confirmedCandleCloseTime,
+          qualityResult: analysis.qualityResult,
+          signal: null,
+          originalSignal: null,
+          inverseSignal: null,
+          aiFilteredSignal: null,
+          aiFilteredInverseSignal: null,
+          pendingRetest: null,
+          message: `Market Structure Quality: ${analysis.qualityResult.qualityGrade.toUpperCase()} (${analysis.qualityResult.qualityScore}/100). ${analysis.qualityResult.rejectionReason}`,
+          scannedAt: Date.now()
+        };
+      }
+
+      // Register ONE legitimate buy or sell signal based on existing strategy
+      const signalToRegister = analysis.aiFilteredSignal || analysis.originalSignal;
+      if (signalToRegister) this.registerSignalSafely(signalToRegister);
 
       this.syncActiveSignalsArray();
       this.watchActiveSignals();
@@ -654,6 +787,20 @@ class ScannerService {
     const c1 = closedCandles[len - 2];
     const c2 = closedCandles[len - 3];
 
+    // 1. EVALUATE MARKET STRUCTURE QUALITY LAYER BEFORE ANY STRATEGY EXECUTION
+    const qualityResult = evaluateMarketStructureQuality(symbol, timeframe, closedCandles, currentPrice);
+    if (!qualityResult.isTradable) {
+      return {
+        originalSignal: null,
+        inverseSignal: null,
+        aiFilteredSignal: null,
+        aiFilteredInverseSignal: null,
+        pendingRetest: null,
+        regimeData: null,
+        qualityResult
+      };
+    }
+
     // Detect Market Regime from closed candle series
     const regimeData = detectMarketRegime(closedCandles);
 
@@ -703,34 +850,34 @@ class ScannerService {
     // TIER 1: BREAK & RETEST (Reinforced Setup)
     // =========================================================================
     if (c1.close > lastHigh && c0.low <= lastHigh && c0.close > lastHigh && c0IsGreen) {
-      baseSignal = this.createSignalItem({
+      baseSignal = this.generateStructuralSignal({
         symbol,
         timeframe,
         direction: 'UP',
         setupType: 'Break & Retest (Reinforced)',
         closePrice: c0.close,
-        invalidationLevel: Math.min(c0.low, lastHigh * 0.994),
         confidence: 96,
         reason: `Break & Retest Confirmed: Previous resistance ($${lastHigh.toFixed(2)}) defended as new support with lower wick rejection and green continuation close.`,
         timestamp: c0.closeTime,
         confirmedCandleCloseTime: c0.closeTime,
-        modelType: 'original',
-        marketRegime: regimeData.regime
+        closedCandles,
+        regimeData,
+        marketStructureQuality: qualityResult
       });
     } else if (c1.close < lastLow && c0.high >= lastLow && c0.close < lastLow && !c0IsGreen) {
-      baseSignal = this.createSignalItem({
+      baseSignal = this.generateStructuralSignal({
         symbol,
         timeframe,
         direction: 'DOWN',
         setupType: 'Break & Retest (Reinforced)',
         closePrice: c0.close,
-        invalidationLevel: Math.max(c0.high, lastLow * 1.006),
         confidence: 96,
         reason: `Break & Retest Confirmed: Previous support ($${lastLow.toFixed(2)}) rejected as new resistance with upper wick rejection and red continuation close.`,
         timestamp: c0.closeTime,
         confirmedCandleCloseTime: c0.closeTime,
-        modelType: 'original',
-        marketRegime: regimeData.regime
+        closedCandles,
+        regimeData,
+        marketStructureQuality: qualityResult
       });
     }
 
@@ -751,34 +898,34 @@ class ScannerService {
         isDecisiveBody;
 
       if (isStrongBullishBreak) {
-        baseSignal = this.createSignalItem({
+        baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
           direction: 'UP',
           setupType: 'Strong Confirmed Break (BOS)',
           closePrice: c0.close,
-          invalidationLevel: Math.max(lastHigh * 0.993, c0.low),
           confidence: isVolExpanding ? 93 : 90,
           reason: `Strong Confirmed Break: Candle closed firmly above swing resistance $${lastHigh.toFixed(2)} with decisive bullish momentum${isVolExpanding ? ' and expanding volume' : ''}. Retest not required.`,
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
-          modelType: 'original',
-          marketRegime: regimeData.regime
+          closedCandles,
+          regimeData,
+          marketStructureQuality: qualityResult
         });
       } else if (isStrongBearishBreak) {
-        baseSignal = this.createSignalItem({
+        baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
           direction: 'DOWN',
           setupType: 'Strong Confirmed Break (BOS)',
           closePrice: c0.close,
-          invalidationLevel: Math.min(lastLow * 1.007, c0.high),
           confidence: isVolExpanding ? 93 : 90,
           reason: `Strong Confirmed Breakdown: Candle closed firmly below swing support $${lastLow.toFixed(2)} with decisive bearish momentum${isVolExpanding ? ' and expanding volume' : ''}. Retest not required.`,
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
-          modelType: 'original',
-          marketRegime: regimeData.regime
+          closedCandles,
+          regimeData,
+          marketStructureQuality: qualityResult
         });
       }
     }
@@ -788,34 +935,34 @@ class ScannerService {
     // =========================================================================
     if (!baseSignal) {
       if (c0.high > lastHigh && c0.close < lastHigh && (c0UpperWick / c0Range) > 0.45 && !c0IsGreen) {
-        baseSignal = this.createSignalItem({
+        baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
           direction: 'DOWN',
           setupType: 'Fakeout Rejection',
           closePrice: c0.close,
-          invalidationLevel: c0.high,
           confidence: 89,
           reason: `Fakeout Rejection: Liquidity sweep above resistance $${lastHigh.toFixed(2)} met with aggressive seller absorption and heavy upper wick rejection.`,
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
-          modelType: 'original',
-          marketRegime: regimeData.regime
+          closedCandles,
+          regimeData,
+          marketStructureQuality: qualityResult
         });
       } else if (c0.low < lastLow && c0.close > lastLow && (c0LowerWick / c0Range) > 0.45 && c0IsGreen) {
-        baseSignal = this.createSignalItem({
+        baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
           direction: 'UP',
           setupType: 'Fakeout Rejection',
           closePrice: c0.close,
-          invalidationLevel: c0.low,
           confidence: 89,
           reason: `Fakeout Rejection: Liquidity sweep below support $${lastLow.toFixed(2)} met with aggressive buyer absorption and strong lower wick defense.`,
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
-          modelType: 'original',
-          marketRegime: regimeData.regime
+          closedCandles,
+          regimeData,
+          marketStructureQuality: qualityResult
         });
       }
     }
@@ -828,34 +975,34 @@ class ScannerService {
       const isBearishEngulfing = !c0IsGreen && c1.isGreen && c0.close < c1.open && c0.open >= c1.close;
 
       if (isBullishEngulfing && Math.abs(c0.low - lastLow) / lastLow < 0.018) {
-        baseSignal = this.createSignalItem({
+        baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
           direction: 'UP',
           setupType: 'Engulfing Confirmation',
           closePrice: c0.close,
-          invalidationLevel: c0.low,
           confidence: 86,
           reason: `Bullish Engulfing Confirmation: Closed at key structural support zone $${lastLow.toFixed(2)} engulfing previous candle body.`,
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
-          modelType: 'original',
-          marketRegime: regimeData.regime
+          closedCandles,
+          regimeData,
+          marketStructureQuality: qualityResult
         });
       } else if (isBearishEngulfing && Math.abs(c0.high - lastHigh) / lastHigh < 0.018) {
-        baseSignal = this.createSignalItem({
+        baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
           direction: 'DOWN',
           setupType: 'Engulfing Confirmation',
           closePrice: c0.close,
-          invalidationLevel: c0.high,
           confidence: 86,
           reason: `Bearish Engulfing Confirmation: Closed at key structural resistance zone $${lastHigh.toFixed(2)} engulfing previous candle body.`,
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
-          modelType: 'original',
-          marketRegime: regimeData.regime
+          closedCandles,
+          regimeData,
+          marketStructureQuality: qualityResult
         });
       }
     }
@@ -950,7 +1097,8 @@ class ScannerService {
       aiFilteredSignal,
       aiFilteredInverseSignal,
       regimeData,
-      pendingRetest
+      pendingRetest,
+      qualityResult
     };
   }
 
@@ -983,7 +1131,9 @@ class ScannerService {
    * Plus walk-forward validation and breakdowns.
    */
   computePerformanceStats() {
-    const allSignals = Array.from(this.performanceSignals.values());
+    const allSignals = Array.from(this.performanceSignals.values()).filter(
+      (s) => !isPermanentlyExcludedSymbol(s.asset)
+    );
 
     const computeForList = (signals) => {
       let activeCount = 0;
@@ -1131,7 +1281,9 @@ class ScannerService {
   }
 
   getScanData() {
-    const all = Array.from(this.performanceSignals.values());
+    const all = Array.from(this.performanceSignals.values()).filter(
+      (s) => !isPermanentlyExcludedSymbol(s.asset)
+    );
     const activeSignals = all
       .filter((s) => s.status === 'ACTIVE')
       .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -1150,9 +1302,16 @@ class ScannerService {
       completedSignals: completedSignals.slice(0, 150),
       activeCount: activeSignals.length,
       completedCount: completedSignals.length,
-      pendingRetests: this.pendingRetests,
-      performance: this.computePerformanceStats()
+      pendingRetests: this.pendingRetests.filter((p) => !isPermanentlyExcludedSymbol(p.asset)),
+      performance: this.computePerformanceStats(),
+      qualityDiagnostics: this.getQualityDiagnostics()
     };
+  }
+
+  getQualityDiagnostics() {
+    return Array.from(this.qualityDiagnostics.values()).filter(
+      (d) => !isPermanentlyExcludedSymbol(d.symbol)
+    );
   }
 }
 

@@ -37,7 +37,7 @@ import { runChartScan } from './scannerEngine.ts';
 import { formatPrice } from '../WatchlistTable.tsx';
 
 export const ChartScanner: React.FC<ChartScannerProps> = (props) => {
-  const [isExpanded, setIsExpanded] = useState<boolean>(true);
+  const [isExpanded, setIsExpanded] = useState<boolean>(false);
   const [manualScanTrigger, setManualScanTrigger] = useState<number>(0);
 
   const targetAsset = props.asset || props.symbol || '';

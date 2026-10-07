@@ -11,6 +11,7 @@
 
 import WebSocket from 'ws';
 import { marketCache } from './marketCache.js';
+import { isPermanentlyExcludedSymbol } from './binanceRest.js';
 
 const BINANCE_WS_URLS = [
   'wss://data-stream.binance.vision/ws/!miniTicker@arr',
@@ -121,7 +122,7 @@ class BinanceSocketManager {
       if (Array.isArray(data)) {
         // Array of 24hr tickers: [{ e: '24hrTicker', E: 167..., s: 'BTCUSDT', c: '...', ... }]
         for (const item of data) {
-          if (!item || !item.s || !item.s.endsWith('USDT')) continue;
+          if (!item || !item.s || !item.s.endsWith('USDT') || isPermanentlyExcludedSymbol(item.s)) continue;
 
           const updated = marketCache.updateFromWs(item.s, item, item.E || Date.now());
           if (updated) {
@@ -134,7 +135,7 @@ class BinanceSocketManager {
             }
           }
         }
-      } else if (data && data.s && data.s.endsWith('USDT')) {
+      } else if (data && data.s && data.s.endsWith('USDT') && !isPermanentlyExcludedSymbol(data.s)) {
         const updated = marketCache.updateFromWs(data.s, data, data.E || Date.now());
         if (updated) {
           for (const cb of this.onTickerCallbacks) {
