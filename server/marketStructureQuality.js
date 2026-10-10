@@ -7,6 +7,7 @@
  */
 
 import { calculateATR, findFractalSwings } from './marketStructureLevels.js';
+import { normalizeSymbol } from './binanceRest.js';
 
 export const PERMANENT_EXCLUDED_SYMBOLS = new Set([
   'USDCUSDT',
@@ -17,8 +18,8 @@ export const PERMANENT_EXCLUDED_SYMBOLS = new Set([
 
 export function isPermanentlyExcludedSymbol(symbol) {
   if (!symbol) return false;
-  const upper = symbol.toUpperCase().trim();
-  return PERMANENT_EXCLUDED_SYMBOLS.has(upper);
+  const upper = String(symbol).toUpperCase().trim().replace(/[\/\-_\s]/g, '');
+  return PERMANENT_EXCLUDED_SYMBOLS.has(upper) || PERMANENT_EXCLUDED_SYMBOLS.has(upper + 'USDT');
 }
 
 export function createPermanentlyExcludedResult(symbol, timeframe) {
@@ -46,7 +47,7 @@ export function createPermanentlyExcludedResult(symbol, timeframe) {
 }
 
 export function evaluateMarketStructureQuality(symbol, timeframe, candles, currentPrice) {
-  const cleanSymbol = (symbol || 'UNKNOWN').toUpperCase().trim();
+  const cleanSymbol = normalizeSymbol(symbol || 'UNKNOWN');
 
   // 1. PERMANENT EXCLUSION CHECK
   if (isPermanentlyExcludedSymbol(cleanSymbol)) {

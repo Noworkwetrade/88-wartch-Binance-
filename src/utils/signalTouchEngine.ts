@@ -49,14 +49,20 @@ export function addClearedSignalId(signalId: string): void {
   if (typeof localStorage === 'undefined') return;
   try {
     const current = loadClearedSignalIds();
+    if (current.has(signalId)) {
+      // Already registered as cleared; avoid redundant writes and dispatches
+      return;
+    }
     current.add(signalId);
     // Keep max 500 recent IDs to avoid unbounded storage
     const trimmed = Array.from(current).slice(-500);
     localStorage.setItem(CLEARED_SIGNALS_STORAGE_KEY, JSON.stringify(trimmed));
 
-    // Dispatch custom event to notify all active chart components in the current window
+    // Dispatch custom event asynchronously to notify active chart components without triggering setState during other components' render cycles
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('nwwt_signal_cleared', { detail: { signalId } }));
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('nwwt_signal_cleared', { detail: { signalId } }));
+      }, 0);
     }
   } catch (err) {
     console.warn('[SignalTouchEngine] Failed to save cleared signal ID:', err);

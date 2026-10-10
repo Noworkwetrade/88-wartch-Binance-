@@ -59,12 +59,30 @@ export const PERMANENT_EXCLUDED_SYMBOLS = new Set<string>([
 ]);
 
 /**
+ * Normalizes trading symbol inputs to standard Binance Spot format.
+ * Handles bare symbols (e.g. BTC -> BTCUSDT), slashes (BTC/USDT -> BTCUSDT),
+ * hyphens (BTC-USDC -> BTCUSDC), and respects USDT, USDC, and USD quote pairs.
+ */
+export function normalizeSymbol(rawSymbol: string): string {
+  if (!rawSymbol) return 'BTCUSDT';
+  let s = String(rawSymbol).trim().toUpperCase();
+  s = s.replace(/[\/\-_\s]/g, '');
+  if (!s) return 'BTCUSDT';
+
+  if (s.endsWith('USDT') || s.endsWith('USDC') || s.endsWith('USD')) {
+    return s;
+  }
+
+  return `${s}USDT`;
+}
+
+/**
  * Checks whether a symbol is permanently excluded from trading analysis
  */
 export function isPermanentlyExcludedSymbol(symbol: string): boolean {
   if (!symbol) return false;
-  const upper = symbol.toUpperCase().trim();
-  return PERMANENT_EXCLUDED_SYMBOLS.has(upper);
+  const upper = String(symbol).toUpperCase().trim().replace(/[\/\-_\s]/g, '');
+  return PERMANENT_EXCLUDED_SYMBOLS.has(upper) || PERMANENT_EXCLUDED_SYMBOLS.has(upper + 'USDT');
 }
 
 /**
@@ -104,7 +122,7 @@ export function evaluateMarketStructureQuality(
   candles: Candle[],
   currentPrice?: number
 ): MarketStructureQualityResult {
-  const cleanSymbol = (symbol || 'UNKNOWN').toUpperCase().trim();
+  const cleanSymbol = normalizeSymbol(symbol || 'UNKNOWN');
 
   // 1. PERMANENT EXCLUSION CHECK
   if (isPermanentlyExcludedSymbol(cleanSymbol)) {

@@ -63,9 +63,24 @@ class ClientSocketServer {
         } else if (parsed.type === 'request_snapshot') {
           this.sendSnapshot(ws);
         } else if (parsed.type === 'run_scan') {
-          scannerService.runScan(parsed.timeframe || '15m').then(() => {
+          if (parsed.timeframe) {
+            scannerService.timeframe = parsed.timeframe;
+          }
+          if (parsed.htfConfirmationEnabled !== undefined) {
+            scannerService.htfConfirmationEnabled = Boolean(parsed.htfConfirmationEnabled);
+          }
+          if (parsed.htfTimeframe) {
+            scannerService.htfTimeframe = parsed.htfTimeframe;
+          }
+          if (parsed.htfRuleMode) {
+            scannerService.htfRuleMode = parsed.htfRuleMode;
+          }
+          scannerService.runScan(parsed.timeframe || scannerService.timeframe).then(() => {
             this.sendScannerData(ws);
           });
+        } else if (parsed.type === 'update_scanner_config') {
+          scannerService.setScannerConfig(parsed);
+          this.sendScannerData(ws);
         }
       } catch (e) {
         // ignore

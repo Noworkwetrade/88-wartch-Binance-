@@ -1,0 +1,596 @@
+{
+  "auditScope": {
+    "totalCandlesSampled": 80000,
+    "assetsEvaluated": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "BNBUSDT",
+      "ADAUSDT",
+      "XRPUSDT",
+      "DOGEUSDT",
+      "LINKUSDT",
+      "AVAXUSDT",
+      "NEARUSDT"
+    ],
+    "timeframesEvaluated": [
+      "5m",
+      "15m",
+      "1h",
+      "4h"
+    ],
+    "frictionModel": "0.20% Round-Trip Fees (Binance Spot VIP0) + 0.05% Execution Slippage"
+  },
+  "squeezeBreakout": {
+    "overall": {
+      "counts": {
+        "totalSetups": 97,
+        "wins": 34,
+        "losses": 40,
+        "expiredTotal": 23,
+        "expiredGains": 12,
+        "expiredLosses": 11,
+        "expiredRatioPct": 23.711340206185564
+      },
+      "definitiveSettlement": {
+        "settledTrades": 74,
+        "winRatePct": 45.95,
+        "profitFactor": 1.09,
+        "expectancyR": 0,
+        "avgWinPct": 2.52,
+        "avgLossPct": 1.97
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 97,
+        "winRatePct": 47.42,
+        "profitFactor": 1.14,
+        "expectancyR": 0.01,
+        "totalNetPnlPct": 11.84,
+        "totalGrossPnlPct": 12.08,
+        "maxDrawdownPct": 37.54
+      }
+    },
+    "inSample": {
+      "counts": {
+        "totalSetups": 66,
+        "wins": 21,
+        "losses": 30,
+        "expiredTotal": 15,
+        "expiredGains": 8,
+        "expiredLosses": 7,
+        "expiredRatioPct": 22.727272727272727
+      },
+      "definitiveSettlement": {
+        "settledTrades": 51,
+        "winRatePct": 41.18,
+        "profitFactor": 0.73,
+        "expectancyR": -0.11,
+        "avgWinPct": 2.31,
+        "avgLossPct": 2.22
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 66,
+        "winRatePct": 43.94,
+        "profitFactor": 0.83,
+        "expectancyR": -0.07,
+        "totalNetPnlPct": -12.35,
+        "totalGrossPnlPct": -12.19,
+        "maxDrawdownPct": 45.85
+      }
+    },
+    "outOfSample": {
+      "counts": {
+        "totalSetups": 31,
+        "wins": 13,
+        "losses": 10,
+        "expiredTotal": 8,
+        "expiredGains": 4,
+        "expiredLosses": 4,
+        "expiredRatioPct": 25.806451612903224
+      },
+      "definitiveSettlement": {
+        "settledTrades": 23,
+        "winRatePct": 56.52,
+        "profitFactor": 3.04,
+        "expectancyR": 0.23,
+        "avgWinPct": 2.86,
+        "avgLossPct": 1.22
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 31,
+        "winRatePct": 54.84,
+        "profitFactor": 2.65,
+        "expectancyR": 0.19,
+        "totalNetPnlPct": 24.19,
+        "totalGrossPnlPct": 24.27,
+        "maxDrawdownPct": 8.03
+      }
+    },
+    "longOnly": {
+      "counts": {
+        "totalSetups": 45,
+        "wins": 14,
+        "losses": 20,
+        "expiredTotal": 11,
+        "expiredGains": 7,
+        "expiredLosses": 4,
+        "expiredRatioPct": 24.444444444444443
+      },
+      "definitiveSettlement": {
+        "settledTrades": 34,
+        "winRatePct": 41.18,
+        "profitFactor": 0.76,
+        "expectancyR": -0.07,
+        "avgWinPct": 2.04,
+        "avgLossPct": 1.87
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 45,
+        "winRatePct": 46.67,
+        "profitFactor": 0.74,
+        "expectancyR": -0.03,
+        "totalNetPnlPct": -11.1,
+        "totalGrossPnlPct": -10.99,
+        "maxDrawdownPct": 22.44
+      }
+    },
+    "shortOnly": {
+      "counts": {
+        "totalSetups": 52,
+        "wins": 20,
+        "losses": 20,
+        "expiredTotal": 12,
+        "expiredGains": 5,
+        "expiredLosses": 7,
+        "expiredRatioPct": 23.076923076923077
+      },
+      "definitiveSettlement": {
+        "settledTrades": 40,
+        "winRatePct": 50,
+        "profitFactor": 1.38,
+        "expectancyR": 0.05,
+        "avgWinPct": 2.86,
+        "avgLossPct": 2.07
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 52,
+        "winRatePct": 48.08,
+        "profitFactor": 1.52,
+        "expectancyR": 0.05,
+        "totalNetPnlPct": 22.94,
+        "totalGrossPnlPct": 23.07,
+        "maxDrawdownPct": 19.54
+      }
+    },
+    "byTimeframe": {
+      "5m": {
+        "counts": {
+          "totalSetups": 35,
+          "wins": 11,
+          "losses": 14,
+          "expiredTotal": 10,
+          "expiredGains": 6,
+          "expiredLosses": 4,
+          "expiredRatioPct": 28.57142857142857
+        },
+        "definitiveSettlement": {
+          "settledTrades": 25,
+          "winRatePct": 44,
+          "profitFactor": 0.58,
+          "expectancyR": -0.09,
+          "avgWinPct": 0.49,
+          "avgLossPct": 0.67
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 35,
+          "winRatePct": 48.57,
+          "profitFactor": 0.79,
+          "expectancyR": -0.01,
+          "totalNetPnlPct": -2.04,
+          "totalGrossPnlPct": -1.95,
+          "maxDrawdownPct": 3.48
+        }
+      },
+      "15m": {
+        "counts": {
+          "totalSetups": 13,
+          "wins": 5,
+          "losses": 5,
+          "expiredTotal": 3,
+          "expiredGains": 0,
+          "expiredLosses": 3,
+          "expiredRatioPct": 23.076923076923077
+        },
+        "definitiveSettlement": {
+          "settledTrades": 10,
+          "winRatePct": 50,
+          "profitFactor": 1.39,
+          "expectancyR": 0.05,
+          "avgWinPct": 1.19,
+          "avgLossPct": 0.85
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 13,
+          "winRatePct": 38.46,
+          "profitFactor": 0.77,
+          "expectancyR": -0.12,
+          "totalNetPnlPct": -1.74,
+          "totalGrossPnlPct": -1.71,
+          "maxDrawdownPct": 6.68
+        }
+      },
+      "1h": {
+        "counts": {
+          "totalSetups": 18,
+          "wins": 7,
+          "losses": 7,
+          "expiredTotal": 4,
+          "expiredGains": 1,
+          "expiredLosses": 3,
+          "expiredRatioPct": 22.22222222222222
+        },
+        "definitiveSettlement": {
+          "settledTrades": 14,
+          "winRatePct": 50,
+          "profitFactor": 1.41,
+          "expectancyR": 0.19,
+          "avgWinPct": 2.82,
+          "avgLossPct": 2
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 18,
+          "winRatePct": 44.44,
+          "profitFactor": 1.19,
+          "expectancyR": 0.13,
+          "totalNetPnlPct": 3.34,
+          "totalGrossPnlPct": 3.39,
+          "maxDrawdownPct": 8.81
+        }
+      },
+      "4h": {
+        "counts": {
+          "totalSetups": 31,
+          "wins": 11,
+          "losses": 14,
+          "expiredTotal": 6,
+          "expiredGains": 5,
+          "expiredLosses": 1,
+          "expiredRatioPct": 19.35483870967742
+        },
+        "definitiveSettlement": {
+          "settledTrades": 25,
+          "winRatePct": 44,
+          "profitFactor": 1.07,
+          "expectancyR": -0.05,
+          "avgWinPct": 4.97,
+          "avgLossPct": 3.66
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 31,
+          "winRatePct": 51.61,
+          "profitFactor": 1.23,
+          "expectancyR": 0.02,
+          "totalNetPnlPct": 12.27,
+          "totalGrossPnlPct": 12.35,
+          "maxDrawdownPct": 28.84
+        }
+      }
+    },
+    "byAssetGroup": {
+      "benchmark": {
+        "counts": {
+          "totalSetups": 27,
+          "wins": 7,
+          "losses": 15,
+          "expiredTotal": 5,
+          "expiredGains": 2,
+          "expiredLosses": 3,
+          "expiredRatioPct": 18.51851851851852
+        },
+        "definitiveSettlement": {
+          "settledTrades": 22,
+          "winRatePct": 31.82,
+          "profitFactor": 0.33,
+          "expectancyR": -0.33,
+          "avgWinPct": 1.7,
+          "avgLossPct": 2.38
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 27,
+          "winRatePct": 33.33,
+          "profitFactor": 0.36,
+          "expectancyR": -0.32,
+          "totalNetPnlPct": -23.88,
+          "totalGrossPnlPct": -23.81,
+          "maxDrawdownPct": 30.33
+        }
+      },
+      "altcoins": {
+        "counts": {
+          "totalSetups": 70,
+          "wins": 27,
+          "losses": 25,
+          "expiredTotal": 18,
+          "expiredGains": 10,
+          "expiredLosses": 8,
+          "expiredRatioPct": 25.71428571428571
+        },
+        "definitiveSettlement": {
+          "settledTrades": 52,
+          "winRatePct": 51.92,
+          "profitFactor": 1.71,
+          "expectancyR": 0.13,
+          "avgWinPct": 2.73,
+          "avgLossPct": 1.73
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 70,
+          "winRatePct": 52.86,
+          "profitFactor": 1.72,
+          "expectancyR": 0.14,
+          "totalNetPnlPct": 35.72,
+          "totalGrossPnlPct": 35.89,
+          "maxDrawdownPct": 18.74
+        }
+      }
+    }
+  },
+  "baselineBos": {
+    "overall": {
+      "counts": {
+        "totalSetups": 174,
+        "wins": 34,
+        "losses": 71,
+        "expiredTotal": 69,
+        "expiredGains": 39,
+        "expiredLosses": 30,
+        "expiredRatioPct": 39.6551724137931
+      },
+      "definitiveSettlement": {
+        "settledTrades": 105,
+        "winRatePct": 32.38,
+        "profitFactor": 0.55,
+        "expectancyR": -0.29,
+        "avgWinPct": 2.38,
+        "avgLossPct": 2.06
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 174,
+        "winRatePct": 41.95,
+        "profitFactor": 0.68,
+        "expectancyR": -0.12,
+        "totalNetPnlPct": -53.6,
+        "totalGrossPnlPct": -53.17,
+        "maxDrawdownPct": 56.34
+      }
+    },
+    "inSample": {
+      "counts": {
+        "totalSetups": 97,
+        "wins": 20,
+        "losses": 45,
+        "expiredTotal": 32,
+        "expiredGains": 14,
+        "expiredLosses": 18,
+        "expiredRatioPct": 32.98969072164948
+      },
+      "definitiveSettlement": {
+        "settledTrades": 65,
+        "winRatePct": 30.77,
+        "profitFactor": 0.34,
+        "expectancyR": -0.35,
+        "avgWinPct": 1.84,
+        "avgLossPct": 2.41
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 97,
+        "winRatePct": 35.05,
+        "profitFactor": 0.39,
+        "expectancyR": -0.23,
+        "totalNetPnlPct": -75.03,
+        "totalGrossPnlPct": -74.78,
+        "maxDrawdownPct": 75.25
+      }
+    },
+    "outOfSample": {
+      "counts": {
+        "totalSetups": 77,
+        "wins": 14,
+        "losses": 26,
+        "expiredTotal": 37,
+        "expiredGains": 25,
+        "expiredLosses": 12,
+        "expiredRatioPct": 48.05194805194805
+      },
+      "definitiveSettlement": {
+        "settledTrades": 40,
+        "winRatePct": 35,
+        "profitFactor": 1.17,
+        "expectancyR": -0.19,
+        "avgWinPct": 3.15,
+        "avgLossPct": 1.45
+      },
+      "markToMarketAtExpiry": {
+        "allInTrades": 77,
+        "winRatePct": 50.65,
+        "profitFactor": 1.49,
+        "expectancyR": 0.02,
+        "totalNetPnlPct": 21.42,
+        "totalGrossPnlPct": 21.61,
+        "maxDrawdownPct": 8.5
+      }
+    },
+    "byTimeframe": {
+      "5m": {
+        "counts": {
+          "totalSetups": 69,
+          "wins": 11,
+          "losses": 26,
+          "expiredTotal": 32,
+          "expiredGains": 18,
+          "expiredLosses": 14,
+          "expiredRatioPct": 46.3768115942029
+        },
+        "definitiveSettlement": {
+          "settledTrades": 37,
+          "winRatePct": 29.73,
+          "profitFactor": 0.52,
+          "expectancyR": -0.38,
+          "avgWinPct": 0.75,
+          "avgLossPct": 0.61
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 69,
+          "winRatePct": 42.03,
+          "profitFactor": 0.73,
+          "expectancyR": -0.13,
+          "totalNetPnlPct": -5.01,
+          "totalGrossPnlPct": -4.84,
+          "maxDrawdownPct": 10.84
+        }
+      },
+      "15m": {
+        "counts": {
+          "totalSetups": 27,
+          "wins": 10,
+          "losses": 10,
+          "expiredTotal": 7,
+          "expiredGains": 4,
+          "expiredLosses": 3,
+          "expiredRatioPct": 25.925925925925924
+        },
+        "definitiveSettlement": {
+          "settledTrades": 20,
+          "winRatePct": 50,
+          "profitFactor": 1.77,
+          "expectancyR": 0.12,
+          "avgWinPct": 2.42,
+          "avgLossPct": 1.37
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 27,
+          "winRatePct": 51.85,
+          "profitFactor": 1.76,
+          "expectancyR": 0.15,
+          "totalNetPnlPct": 11.33,
+          "totalGrossPnlPct": 11.39,
+          "maxDrawdownPct": 7.86
+        }
+      },
+      "1h": {
+        "counts": {
+          "totalSetups": 46,
+          "wins": 8,
+          "losses": 19,
+          "expiredTotal": 19,
+          "expiredGains": 13,
+          "expiredLosses": 6,
+          "expiredRatioPct": 41.30434782608695
+        },
+        "definitiveSettlement": {
+          "settledTrades": 27,
+          "winRatePct": 29.63,
+          "profitFactor": 0.37,
+          "expectancyR": -0.37,
+          "avgWinPct": 2.12,
+          "avgLossPct": 2.39
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 46,
+          "winRatePct": 45.65,
+          "profitFactor": 0.63,
+          "expectancyR": -0.15,
+          "totalNetPnlPct": -19.6,
+          "totalGrossPnlPct": -19.49,
+          "maxDrawdownPct": 21.95
+        }
+      },
+      "4h": {
+        "counts": {
+          "totalSetups": 32,
+          "wins": 5,
+          "losses": 16,
+          "expiredTotal": 11,
+          "expiredGains": 4,
+          "expiredLosses": 7,
+          "expiredRatioPct": 34.375
+        },
+        "definitiveSettlement": {
+          "settledTrades": 21,
+          "winRatePct": 23.81,
+          "profitFactor": 0.44,
+          "expectancyR": -0.43,
+          "avgWinPct": 6.3,
+          "avgLossPct": 4.46
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 32,
+          "winRatePct": 28.13,
+          "profitFactor": 0.5,
+          "expectancyR": -0.28,
+          "totalNetPnlPct": -40.32,
+          "totalGrossPnlPct": -40.24,
+          "maxDrawdownPct": 46.34
+        }
+      }
+    },
+    "byAssetGroup": {
+      "benchmark": {
+        "counts": {
+          "totalSetups": 54,
+          "wins": 12,
+          "losses": 23,
+          "expiredTotal": 19,
+          "expiredGains": 13,
+          "expiredLosses": 6,
+          "expiredRatioPct": 35.18518518518518
+        },
+        "definitiveSettlement": {
+          "settledTrades": 35,
+          "winRatePct": 34.29,
+          "profitFactor": 0.5,
+          "expectancyR": -0.26,
+          "avgWinPct": 2.13,
+          "avgLossPct": 2.21
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 54,
+          "winRatePct": 46.3,
+          "profitFactor": 0.65,
+          "expectancyR": -0.09,
+          "totalNetPnlPct": -18.55,
+          "totalGrossPnlPct": -18.42,
+          "maxDrawdownPct": 32.25
+        }
+      },
+      "altcoins": {
+        "counts": {
+          "totalSetups": 120,
+          "wins": 22,
+          "losses": 48,
+          "expiredTotal": 50,
+          "expiredGains": 26,
+          "expiredLosses": 24,
+          "expiredRatioPct": 41.66666666666667
+        },
+        "definitiveSettlement": {
+          "settledTrades": 70,
+          "winRatePct": 31.43,
+          "profitFactor": 0.58,
+          "expectancyR": -0.3,
+          "avgWinPct": 2.52,
+          "avgLossPct": 1.99
+        },
+        "markToMarketAtExpiry": {
+          "allInTrades": 120,
+          "winRatePct": 40,
+          "profitFactor": 0.69,
+          "expectancyR": -0.13,
+          "totalNetPnlPct": -35.05,
+          "totalGrossPnlPct": -34.75,
+          "maxDrawdownPct": 42.42
+        }
+      }
+    }
+  }
+}

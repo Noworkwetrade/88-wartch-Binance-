@@ -24,6 +24,8 @@ import {
   Clock,
   ArrowRight,
   Shield,
+  ShieldCheck,
+  SlidersHorizontal,
   Layers,
   Sparkles,
   Target,
@@ -57,6 +59,7 @@ import {
 import { formatPrice } from './WatchlistTable.tsx';
 import { loadClearedSignalIds } from '../utils/signalTouchEngine.ts';
 import { isPermanentlyExcludedSymbol } from '../utils/marketStructureQuality.ts';
+import { ScanAssetModal, SingleAssetEvaluation } from './scanner/ScanAssetModal.tsx';
 
 interface WatchlistScannerPanelProps {
   scannerState: ScannerState;
@@ -64,6 +67,12 @@ interface WatchlistScannerPanelProps {
   onSelectAsset: (symbol: string) => void;
   onTimeframeChange: (tf: Timeframe) => void;
   onTriggerScan: (tf?: Timeframe) => void;
+  onUpdateScannerConfig?: (config: {
+    timeframe?: Timeframe;
+    htfConfirmationEnabled?: boolean;
+    htfTimeframe?: Timeframe;
+    htfRuleMode?: 'lenient' | 'aligned' | 'strict';
+  }) => void;
   performanceSignals: ScannerSignalItem[];
   activeSignals?: ScannerSignalItem[];
   completedSignals?: ScannerSignalItem[];
@@ -71,7 +80,7 @@ interface WatchlistScannerPanelProps {
   onClearHistory?: () => void;
 }
 
-const SCANNER_TIMEFRAMES: Timeframe[] = ['15m', '1h', '4h'];
+const SCANNER_TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
 function formatCandleCloseTime(timestamp?: number): string {
   if (!timestamp) return '--';
@@ -87,6 +96,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   onSelectAsset,
   onTimeframeChange,
   onTriggerScan,
+  onUpdateScannerConfig,
   performanceSignals,
   activeSignals,
   completedSignals,
@@ -131,6 +141,36 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
   // Single asset on active chart scanning state
   const [isScanningSpecificAsset, setIsScanningSpecificAsset] = useState<boolean>(false);
   const [scanMessage, setScanMessage] = useState<string | null>(null);
+  const [isScanModalOpen, setIsScanModalOpen] = useState<boolean>(false);
+  const [singleAssetEvaluation, setSingleAssetEvaluation] = useState<SingleAssetEvaluation | null>(null);
+
+  // Multi-Timeframe Confirmation & Fair Coverage settings
+  const htfEnabled = Boolean(scannerState.htfConfirmationEnabled);
+  const htfTf = scannerState.htfTimeframe || '1h';
+  const htfRuleMode = scannerState.htfRuleMode || 'lenient';
+  const coverageMetrics = scannerState.coverageMetrics;
+
+  const handleToggleHtf = () => {
+    const nextVal = !htfEnabled;
+    if (onUpdateScannerConfig) {
+      onUpdateScannerConfig({ htfConfirmationEnabled: nextVal });
+    }
+    onTriggerScan(timeframe);
+  };
+
+  const handleHtfTimeframeChange = (newTf: Timeframe) => {
+    if (onUpdateScannerConfig) {
+      onUpdateScannerConfig({ htfTimeframe: newTf });
+    }
+    onTriggerScan(timeframe);
+  };
+
+  const handleHtfRuleModeChange = (newMode: 'lenient' | 'aligned' | 'strict') => {
+    if (onUpdateScannerConfig) {
+      onUpdateScannerConfig({ htfRuleMode: newMode });
+    }
+    onTriggerScan(timeframe);
+  };
 
   /**
    * Scans the specific asset currently selected on the chart using live market data.
@@ -153,6 +193,10 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
       const data = await res.json();
       if (data && data.result) {
         const r = data.result;
+        if (r.evaluation) {
+          setSingleAssetEvaluation(r.evaluation);
+          setIsScanModalOpen(true);
+        }
         if (r.signal) {
           const valStatus = r.signal.aiValidation?.status?.toUpperCase() || 'EVALUATED';
           setScanMessage(
@@ -239,6 +283,21 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
     return [...list].sort((a, b) => (b.completedAt || b.timestamp || 0) - (a.completedAt || a.timestamp || 0));
   }, [performanceSignals, completedSignals, selectedModelFilter, historyFilter]);
 
+  // STRICT SETTLED HISTORICAL LOG: Directly corresponds to the verified performance statistics
+  // Contains all verified settled trade records (WIN / LOSS / EXPIRED) without model or outcome filter discrepancies.
+  const settledHistoricalLog = useMemo(() => {
+    const clearedSet = loadClearedSignalIds();
+    let list = (completedSignals || performanceSignals).filter(
+      (s) =>
+        !isPermanentlyExcludedSymbol(s.asset) &&
+        (s.isTradeComplete || s.status === 'LOSS' || s.status === 'EXPIRED' || (s.status === 'WIN' && (s.isTradeComplete || clearedSet.has(s.id))) || clearedSet.has(s.id)) &&
+        s.modelType !== 'inverse' &&
+        s.modelType !== 'ai_filtered_inverse'
+    );
+
+    return [...list].sort((a, b) => (b.completedAt || b.timestamp || 0) - (a.completedAt || a.timestamp || 0));
+  }, [performanceSignals, completedSignals]);
+
   // Models stats extraction from server or local
   const models = performanceStats.byModel || {
     original: performanceStats,
@@ -286,7 +345,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
             title={`Scan technical structure & setups for currently selected chart asset (${selectedAsset || 'BTCUSDT'})`}
           >
             <Sparkles className={`w-3 h-3 ${isScanningSpecificAsset ? 'animate-spin' : ''}`} />
-            <span>{isScanningSpecificAsset ? 'Scanning Asset...' : 'Scan Market'}</span>
+            <span>{isScanningSpecificAsset ? 'Scanning Asset...' : 'Scan Asset'}</span>
           </button>
 
           <div className="flex items-center bg-[#13151f] rounded border border-[#202230] p-0.5">
@@ -340,6 +399,106 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
           </button>
         </div>
       )}
+
+      {/* Fair Universe Coverage Progress Bar */}
+      {coverageMetrics && coverageMetrics.totalEligibleSymbols > 0 && (
+        <div className="px-3 py-1.5 bg-[#0a0b10] border-b border-[#161722] flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-mono text-slate-400 shrink-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="flex items-center gap-1 text-slate-300 font-semibold">
+              <Activity className="w-3 h-3 text-emerald-400 shrink-0" />
+              <span>Fair Coverage:</span>
+            </span>
+            <span className="text-white font-bold">
+              {coverageMetrics.totalEligibleSymbols} Eligible USDT Pairs
+            </span>
+            <span className="text-slate-600 hidden sm:inline">•</span>
+            <span className="text-amber-400">
+              Batch {coverageMetrics.batchIndex}/{coverageMetrics.totalBatches} ({coverageMetrics.batchSize} pairs/scan)
+            </span>
+            <span className="text-slate-600 hidden sm:inline">•</span>
+            <span className="text-slate-400">
+              Full Rotation ~{Math.ceil((coverageMetrics.estFullRotationSeconds || 945) / 60)}m
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-[10px] ml-auto">
+            <span className="text-slate-500 hidden md:inline">BTC & ETH Anchored • Altcoins Round-Robin</span>
+            <div className="w-16 h-1.5 bg-[#181a24] rounded-full overflow-hidden shrink-0">
+              <div
+                className="h-full bg-amber-400 rounded-full transition-all duration-500"
+                style={{ width: `${Math.max(5, Math.min(100, Math.round((coverageMetrics.batchIndex / coverageMetrics.totalBatches) * 100)))}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Multi-Timeframe Confirmation Control Bar */}
+      <div className="px-3 py-1.5 bg-[#0c0e15] border-b border-[#181a24] flex flex-wrap items-center justify-between gap-2 shrink-0 text-xs font-mono">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={handleToggleHtf}
+            className={`px-2 py-0.5 rounded font-bold flex items-center gap-1 text-[11px] transition cursor-pointer ${
+              htfEnabled
+                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
+                : 'bg-[#141622] text-slate-400 border border-[#222536] hover:text-white'
+            }`}
+            title="Enable or disable higher timeframe trend and regime confirmation"
+          >
+            <ShieldCheck className={`w-3.5 h-3.5 ${htfEnabled ? 'text-sky-400' : 'text-slate-500'}`} />
+            <span>HTF Confluence: {htfEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+
+          {htfEnabled && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] text-slate-500">HTF:</span>
+              <div className="flex items-center bg-[#13151f] rounded border border-[#202230] p-0.5">
+                {(['5m', '15m', '1h', '4h', '1d'] as Timeframe[]).map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => handleHtfTimeframeChange(tf)}
+                    className={`px-1.5 py-0.2 text-[10px] rounded transition cursor-pointer ${
+                      htfTf === tf
+                        ? 'bg-sky-500 text-black font-bold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+
+              <span className="text-[10px] text-slate-500 ml-1">Mode:</span>
+              <div className="flex items-center bg-[#13151f] rounded border border-[#202230] p-0.5">
+                {(['lenient', 'aligned', 'strict'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => handleHtfRuleModeChange(mode)}
+                    className={`px-1.5 py-0.2 text-[10px] capitalize rounded transition cursor-pointer ${
+                      htfRuleMode === mode
+                        ? 'bg-amber-500 text-black font-bold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                    title={
+                      mode === 'lenient'
+                        ? 'Lenient: Setup allowed unless HTF trend directly opposes it'
+                        : mode === 'aligned'
+                        ? 'Aligned: HTF trend direction must match setup direction'
+                        : 'Strict: HTF trend must match and regime must not be transitioning'
+                    }
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="text-[10px] text-slate-500 hidden sm:block">
+          Entry: <strong className="text-amber-400">{timeframe}</strong>
+          {htfEnabled ? ` • Filter: ${htfTf} (${htfRuleMode})` : ' • Direct Entry'}
+        </div>
+      </div>
 
       {/* Top 3 Sub-Tabs Navigation */}
       <div className="flex items-center border-b border-[#181a24] bg-[#090a0f] p-1 shrink-0">
@@ -506,6 +665,19 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                           <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-[#1d2030] text-amber-400 border border-amber-500/30">
                             {latestActiveSignal.timeframe}
                           </span>
+                          {latestActiveSignal.htfConfirmation && (
+                            <span
+                              className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold flex items-center gap-1 border ${
+                                latestActiveSignal.htfConfirmation.status === 'confirmed'
+                                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                                  : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                              }`}
+                              title={latestActiveSignal.htfConfirmation.reason}
+                            >
+                              <ShieldCheck className="w-3 h-3 text-sky-400" />
+                              HTF: {latestActiveSignal.htfConfirmation.htfTimeframe || 'HTF'}
+                            </span>
+                          )}
                           <span
                             className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold flex items-center gap-1 ${
                               latestActiveSignal.direction === 'UP'
@@ -643,6 +815,19 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                                 <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-[#161822] text-amber-400 border border-amber-500/20">
                                   {s.timeframe}
                                 </span>
+                                {s.htfConfirmation && (
+                                  <span
+                                    className={`px-1 py-0.2 rounded text-[9px] font-mono font-bold flex items-center gap-0.5 border ${
+                                      s.htfConfirmation.status === 'confirmed'
+                                        ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                                        : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                                    }`}
+                                    title={s.htfConfirmation.reason}
+                                  >
+                                    <ShieldCheck className="w-2.5 h-2.5 text-sky-400" />
+                                    {s.htfConfirmation.htfTimeframe || 'HTF'}
+                                  </span>
+                                )}
                                 <span
                                   className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold flex items-center gap-0.5 ${
                                     isUp
@@ -1622,7 +1807,7 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-mono font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-slate-400" />
-                  Settled Historical Log ({completedHistoryList.length})
+                  Settled Historical Log ({settledHistoricalLog.length})
                 </span>
 
                 {onClearHistory && (
@@ -1637,13 +1822,13 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
                 )}
               </div>
 
-              {completedHistoryList.length === 0 ? (
+              {settledHistoricalLog.length === 0 ? (
                 <div className="p-4 text-center text-slate-500 font-mono text-xs">
                   No completed trades yet. Watching live market data for target touches.
                 </div>
               ) : (
                 <div className="space-y-1.5 font-mono max-h-[300px] overflow-y-auto pr-1">
-                  {completedHistoryList.map((c) => (
+                  {settledHistoricalLog.map((c) => (
                     <div
                       key={c.id}
                       className="p-2 rounded bg-[#090a0f] border border-[#161822] flex items-center justify-between text-xs"
@@ -1803,6 +1988,17 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* Real-time Single Asset Evaluation Modal */}
+      <ScanAssetModal
+        isOpen={isScanModalOpen}
+        onClose={() => setIsScanModalOpen(false)}
+        isLoading={isScanningSpecificAsset}
+        evaluation={singleAssetEvaluation}
+        asset={selectedAsset || 'BTCUSDT'}
+        timeframe={timeframe}
+        onRescan={handleScanMarket}
+      />
     </div>
   );
 };

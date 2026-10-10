@@ -39,11 +39,10 @@ export function useSignalPerformance(
     const listToMerge = [...(incomingSignals || []), ...(incomingCompleted || [])];
     if (listToMerge.length === 0) return;
 
-    setSignals((prev) => {
-      const merged = mergeScannerSignals(prev, listToMerge);
-      saveStoredSignals(merged);
-      return merged;
-    });
+    const currentSignals = signalsRef.current;
+    const merged = mergeScannerSignals(currentSignals, listToMerge);
+    saveStoredSignals(merged);
+    setSignals(merged);
   }, [incomingSignals, incomingCompleted]);
 
   // Synchronize when a signal is settled on chart
@@ -109,11 +108,9 @@ export function useSignalPerformance(
   const clearHistory = useCallback(() => {
     // Retain only genuinely active signals, clear completed
     const clearedSet = loadClearedSignalIds();
-    setSignals((prev) => {
-      const kept = prev.filter((s) => s.status === 'ACTIVE' && !clearedSet.has(s.id));
-      saveStoredSignals(kept);
-      return kept;
-    });
+    const kept = signalsRef.current.filter((s) => s.status === 'ACTIVE' && !clearedSet.has(s.id));
+    saveStoredSignals(kept);
+    setSignals(kept);
   }, []);
 
   return {

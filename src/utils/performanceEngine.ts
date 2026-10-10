@@ -92,24 +92,69 @@ export function mergeScannerSignals(
     if (clearedSet.has(inc.id)) {
       if (existing) {
         if (inc.status && inc.status !== 'ACTIVE') {
-          signalMap.set(inc.id, { ...existing, ...inc });
+          signalMap.set(inc.id, { ...existing, ...inc, isTradeComplete: true });
         }
       } else if (inc.status && inc.status !== 'ACTIVE') {
-        signalMap.set(inc.id, inc);
+        signalMap.set(inc.id, { ...inc, isTradeComplete: true });
       }
       continue;
     }
 
-    if (!existing) {
-      // Prevent duplicate signals from the same closed candle across identical asset/timeframe/model
-      const isDuplicateCandle = Array.from(signalMap.values()).some((s) =>
-        s.asset === inc.asset &&
-        s.timeframe === inc.timeframe &&
-        (s.modelType || 'original') === (inc.modelType || 'original') &&
-        (s.confirmedCandleCloseTime === inc.confirmedCandleCloseTime || s.timestamp === inc.timestamp)
-      );
+    // Check if a sibling signal for the exact same asset, timeframe, and closed candle exists
+    const matchingCandleSignal = Array.from(signalMap.values()).find((s) =>
+      s.asset === inc.asset &&
+      s.timeframe === inc.timeframe &&
+      (s.confirmedCandleCloseTime === inc.confirmedCandleCloseTime || s.timestamp === inc.timestamp)
+    );
 
-      if (isDuplicateCandle) {
+    // If incoming trade is already settled (WIN / LOSS / EXPIRED), ensure all related variants are settled & cleared
+    if (inc.status && inc.status !== 'ACTIVE') {
+      addClearedSignalId(inc.id);
+
+      if (matchingCandleSignal) {
+        addClearedSignalId(matchingCandleSignal.id);
+        const resolvedStatus = (matchingCandleSignal.tp1Hit || matchingCandleSignal.status === 'WIN') ? 'WIN' : inc.status;
+        signalMap.set(matchingCandleSignal.id, {
+          ...matchingCandleSignal,
+          status: resolvedStatus,
+          isTradeComplete: true,
+          completedAt: inc.completedAt || matchingCandleSignal.completedAt || Date.now(),
+          exitPrice: inc.exitPrice !== undefined ? inc.exitPrice : matchingCandleSignal.exitPrice,
+          statusReason: inc.statusReason || matchingCandleSignal.statusReason,
+          displayMessage: inc.displayMessage || matchingCandleSignal.displayMessage,
+          pnlPercent: inc.pnlPercent !== undefined ? inc.pnlPercent : matchingCandleSignal.pnlPercent
+        });
+      }
+
+      if (existing) {
+        const resolvedStatus = (existing.tp1Hit || existing.status === 'WIN') ? 'WIN' : inc.status;
+        signalMap.set(inc.id, {
+          ...existing,
+          ...inc,
+          status: resolvedStatus,
+          isTradeComplete: true,
+          completedAt: inc.completedAt || existing.completedAt || Date.now(),
+          exitPrice: inc.exitPrice !== undefined ? inc.exitPrice : existing.exitPrice
+        });
+      } else {
+        signalMap.set(inc.id, {
+          ...inc,
+          isTradeComplete: true
+        });
+      }
+      continue;
+    }
+
+    // If matching candle setup is already settled / completed, DO NOT resurrect an ACTIVE signal
+    if (matchingCandleSignal && (matchingCandleSignal.isTradeComplete || matchingCandleSignal.status !== 'ACTIVE' || clearedSet.has(matchingCandleSignal.id))) {
+      addClearedSignalId(inc.id);
+      continue;
+    }
+
+    if (!existing) {
+      // Prevent duplicate active signals from the same closed candle across identical asset/timeframe
+      if (matchingCandleSignal) {
+        // If an active setup already exists for this closed candle, do not spawn a duplicate
         continue;
       }
 
@@ -124,6 +169,8 @@ export function mergeScannerSignals(
     } else if (existing) {
       // If incoming has newer completion state or tp1/tp2 hits, merge them cleanly
       if (inc.status && inc.status !== 'ACTIVE') {
+        addClearedSignalId(inc.id);
+        addClearedSignalId(existing.id);
         signalMap.set(inc.id, {
           ...existing,
           ...inc,
@@ -131,7 +178,9 @@ export function mergeScannerSignals(
           status: (existing.tp1Hit || existing.status === 'WIN') ? 'WIN' : inc.status,
           tp1Hit: existing.tp1Hit || inc.tp1Hit,
           tp2Hit: existing.tp2Hit || inc.tp2Hit,
-          isTradeComplete: existing.isTradeComplete || inc.isTradeComplete
+          isTradeComplete: true,
+          completedAt: inc.completedAt || existing.completedAt || Date.now(),
+          exitPrice: inc.exitPrice !== undefined ? inc.exitPrice : existing.exitPrice
         });
       } else if (inc.tp1Hit || inc.tp2Hit) {
         signalMap.set(inc.id, {
@@ -388,7 +437,9 @@ export function settleSignalOutcome(
         addClearedSignalId(signalId);
       }
       if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('nwwt_signal_settled', { detail: { signalId, outcome } }));
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('nwwt_signal_settled', { detail: { signalId, outcome } }));
+        }, 0);
       }
     }
   } catch (err) {

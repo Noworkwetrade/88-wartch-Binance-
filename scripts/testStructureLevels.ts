@@ -432,6 +432,95 @@ async function runStructureLevelTests() {
     );
   }
 
+  // =========================================================================
+  // TEST GROUP 8: 5-Minute Swing High and Swing Low Stop Loss Placement
+  // =========================================================================
+  console.log('\nTEST GROUP 8: 5-Minute Swing Low/High Stop Loss and Take Profit Behavior');
+  {
+    // Build 5-minute candles with clear swing low at 64250 and swing high target at 65500
+    const candles5mLong: Candle[] = [];
+    const now = Date.now();
+    for (let i = 25; i >= 1; i--) {
+      const openTime = now - i * 5 * 60 * 1000;
+      const closeTime = openTime + 5 * 60 * 1000 - 1;
+      let low = 64600, high = 65100, close = 64900;
+      if (i === 15) { low = 64250; close = 64400; } // Previous 5m Swing Low
+      if (i === 8) { high = 65500; close = 65350; }  // Target 5m Swing High
+      if (i === 1) { close = 64900; high = 64950; low = 64820; } // Entry
+      candles5mLong.push({ openTime, closeTime, open: close - 30, high, low, close, volume: 1500 });
+    }
+
+    const buyResult = calculateMarketStructureLevels({
+      symbol: 'BTCUSDT',
+      timeframe: '5m',
+      direction: 'UP',
+      entryPrice: 64900,
+      candles: candles5mLong
+    });
+
+    assert(buyResult.isValid, '8.1 Buy signal on 5m candles is valid');
+    assert(
+      buyResult.stopLoss < 64250,
+      `8.2 Buy stop loss ($${buyResult.stopLoss}) is anchored below the lowest point of the previous 5m swing low ($64,250)`
+    );
+    assert(
+      buyResult.takeProfit1 === 65500,
+      `8.3 Buy take profit 1 ($${buyResult.takeProfit1}) anchors to the structural swing high ($65,500)`
+    );
+    assert(
+      buyResult.structureReference.swingLow === 64250,
+      '8.4 Structure reference records exact swing low lowest point ($64,250)'
+    );
+
+    // Build 5-minute candles for SELL with clear swing high at 65800 and swing low target at 64100
+    const candles5mShort: Candle[] = [];
+    for (let i = 25; i >= 1; i--) {
+      const openTime = now - i * 5 * 60 * 1000;
+      const closeTime = openTime + 5 * 60 * 1000 - 1;
+      let low = 64800, high = 65300, close = 65000;
+      if (i === 15) { high = 65800; close = 65650; } // Previous 5m Swing High
+      if (i === 8) { low = 64100; close = 64300; }   // Target 5m Swing Low
+      if (i === 1) { close = 65000; high = 65120; low = 64950; } // Entry
+      candles5mShort.push({ openTime, closeTime, open: close + 30, high, low, close, volume: 1500 });
+    }
+
+    const sellResult = calculateMarketStructureLevels({
+      symbol: 'BTCUSDT',
+      timeframe: '5m',
+      direction: 'DOWN',
+      entryPrice: 65000,
+      candles: candles5mShort
+    });
+
+    assert(sellResult.isValid, '8.5 Sell signal on 5m candles is valid');
+    assert(
+      sellResult.stopLoss > 65800,
+      `8.6 Sell stop loss ($${sellResult.stopLoss}) is at the top of the highest point of the 5-minute swing high ($65,800)`
+    );
+    assert(
+      sellResult.takeProfit1 === 64100,
+      `8.7 Sell take profit 1 ($${sellResult.takeProfit1}) anchors to the structural swing low ($64,100)`
+    );
+    assert(
+      sellResult.structureReference.swingHigh === 65800,
+      '8.8 Structure reference records exact swing high highest point ($65,800)'
+    );
+
+    // Test with fiveMinCandles supplied explicitly to a 15m scan
+    const buyWith5mContext = calculateMarketStructureLevels({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      direction: 'UP',
+      entryPrice: 64900,
+      candles: candles5mLong,
+      fiveMinCandles: candles5mLong
+    });
+    assert(
+      buyWith5mContext.stopLoss < 64250,
+      `8.9 Multi-TF scan uses explicit 5m candles for swing low stop loss ($${buyWith5mContext.stopLoss})`
+    );
+  }
+
   console.log('\n======================================================');
   console.log(`STRUCTURE LEVEL SUITE RESULTS: ${passedTests} / ${totalTests} PASSED`);
   console.log('======================================================\n');

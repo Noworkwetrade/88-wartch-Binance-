@@ -228,17 +228,73 @@ export function useBinanceMarket() {
     };
   }, [connect]);
 
-  // Request server to run scanner on chosen timeframe
-  const triggerScan = useCallback((timeframe: Timeframe = '15m') => {
-    setScannerState((prev) => ({ ...prev, status: 'scanning', timeframe }));
-    const ws = socketRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'run_scan', timeframe }));
+  // Request server to run scanner on chosen timeframe with optional HTF confirmation parameters
+  const triggerScan = useCallback((
+    timeframe: Timeframe = '15m',
+    options?: {
+      htfConfirmationEnabled?: boolean;
+      htfTimeframe?: Timeframe;
+      htfRuleMode?: 'lenient' | 'aligned' | 'strict';
     }
-    fetch(`/api/scanner`)
+  ) => {
+    setScannerState((prev) => ({
+      ...prev,
+      status: 'scanning',
+      timeframe,
+      ...(options?.htfConfirmationEnabled !== undefined ? { htfConfirmationEnabled: options.htfConfirmationEnabled } : {}),
+      ...(options?.htfTimeframe ? { htfTimeframe: options.htfTimeframe } : {}),
+      ...(options?.htfRuleMode ? { htfRuleMode: options.htfRuleMode } : {})
+    }));
+
+    const ws = socketRef.current;
+    const payload = {
+      type: 'run_scan',
+      timeframe,
+      ...(options || {})
+    };
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+
+    // Also update server via REST fallback
+    fetch(`/api/scanner/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timeframe, ...(options || {}) })
+    })
       .then((res) => res.json())
       .then((data) => {
-        if (data) setScannerState(data);
+        if (data && data.scanner) setScannerState(data.scanner);
+      })
+      .catch(() => {
+        fetch(`/api/scanner`)
+          .then((res) => res.json())
+          .then((data) => {
+            if (data) setScannerState(data);
+          })
+          .catch(() => {});
+      });
+  }, []);
+
+  const updateScannerConfig = useCallback((config: {
+    timeframe?: Timeframe;
+    htfConfirmationEnabled?: boolean;
+    htfTimeframe?: Timeframe;
+    htfRuleMode?: 'lenient' | 'aligned' | 'strict';
+  }) => {
+    const ws = socketRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'update_scanner_config', ...config }));
+    }
+    fetch(`/api/scanner/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config)
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.scanner) setScannerState(data.scanner);
       })
       .catch(() => {});
   }, []);
@@ -263,6 +319,7 @@ export function useBinanceMarket() {
     lastTickTime,
     scannerState,
     triggerScan,
+    updateScannerConfig,
     reconnectBackend
   };
 }

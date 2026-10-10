@@ -123,6 +123,7 @@ export function calculateMarketStructureLevels(options) {
     entryPrice,
     candles,
     higherTfCandles,
+    fiveMinCandles,
     setupType = 'Market Structure Setup',
     minRiskRewardRatio = 0.80,
     maxRiskPercent = 6.5,
@@ -162,12 +163,16 @@ export function calculateMarketStructureLevels(options) {
 
   // 1. Calculate Volatility & Dynamic Buffer for this specific pair & timeframe
   const atr = calculateATR(candles, 14);
-  const minBuffer = entryPrice * 0.0005;
-  const buffer = Math.max(minBuffer, Math.min(entryPrice * 0.0025, atr * 0.12));
+  const minBuffer = entryPrice * 0.0002;
+  const buffer = Math.max(minBuffer, Math.min(entryPrice * 0.001, atr * 0.08));
 
   // 2. Identify Fractal Swings and S/R clusters
   const { highs, lows } = findFractalSwings(candles, 2);
   const { supports, resistances } = clusterSupportResistance(candles);
+
+  // 5-minute candles for the 5-minute swing high/low if available, otherwise input candles
+  const swingCandles = (fiveMinCandles && fiveMinCandles.length >= 5) ? fiveMinCandles : candles;
+  const { highs: swingHighs, lows: swingLows } = findFractalSwings(swingCandles, 2);
 
   // Higher timeframe context if available
   let htfHighs = [];
@@ -188,36 +193,20 @@ export function calculateMarketStructureLevels(options) {
     // LONG SETUP: Structure-Based Stop Loss and Take Profit
     // =========================================================================
 
-    // A. Identify the most relevant recent swing low before entry
-    const validLowsBelow = lows
+    // A. Identify the most relevant recent 5-minute swing low before entry
+    // The stop loss must be below the last 5-minute swing low at the lowest point of the previous swing
+    const validLowsBelow = swingLows
       .filter((l) => l.price < entryPrice)
       .sort((a, b) => b.time - a.time);
 
-    let candidateLow = validLowsBelow.length > 0 ? validLowsBelow[0].price : recentLowestLow;
+    const recentWindowLows = swingCandles.slice(-20).map((c) => c.low);
+    const fallbackLow = Math.min(...recentWindowLows);
 
-    // Check nearby support shelf
-    const nearbySupports = supports.filter((s) => s < entryPrice && s >= candidateLow * 0.985);
-    let chosenSupport = candidateLow;
-    if (nearbySupports.length > 0) {
-      chosenSupport = Math.min(...nearbySupports);
-    }
+    const candidateLow = validLowsBelow.length > 0 ? validLowsBelow[0].price : fallbackLow;
+    const structuralLow = candidateLow;
+    const chosenSupport = structuralLow;
 
-    // HTF Context: Do not allow a small timeframe swing to override a major nearby HTF support floor
-    if (htfLows.length > 0) {
-      const nearbyHtfSupport = htfLows
-        .map((l) => l.price)
-        .filter((p) => p < entryPrice && Math.abs(entryPrice - p) / entryPrice < 0.035);
-      if (nearbyHtfSupport.length > 0) {
-        const majorFloor = Math.max(...nearbyHtfSupport);
-        if (majorFloor < candidateLow && (candidateLow - majorFloor) / entryPrice < 0.008) {
-          chosenSupport = majorFloor;
-        }
-      }
-    }
-
-    const structuralLow = Math.min(candidateLow, chosenSupport);
-
-    // Place stop loss beyond the logical invalidation area with structure-based buffer
+    // Place stop loss below the last 5-minute swing low with small structure buffer
     const stopLoss = parseFloat((structuralLow - buffer).toFixed(6));
     const riskDistance = parseFloat((entryPrice - stopLoss).toFixed(6));
     const riskPercent = (riskDistance / entryPrice) * 100;
@@ -324,32 +313,20 @@ export function calculateMarketStructureLevels(options) {
     // SHORT SETUP: Structure-Based Stop Loss and Take Profit
     // =========================================================================
 
-    const validHighsAbove = highs
+    // A. Identify the highest point of the 5-minute swing high before entry
+    // If it's a sell signal the stop loss should be at the top of the highest point of the 5-minute swing high
+    const validHighsAbove = swingHighs
       .filter((h) => h.price > entryPrice)
       .sort((a, b) => b.time - a.time);
 
-    let candidateHigh = validHighsAbove.length > 0 ? validHighsAbove[0].price : recentHighestHigh;
+    const recentWindowHighs = swingCandles.slice(-20).map((c) => c.high);
+    const fallbackHigh = Math.max(...recentWindowHighs);
 
-    const nearbyResistances = resistances.filter((r) => r > entryPrice && r <= candidateHigh * 1.015);
-    let chosenResistance = candidateHigh;
-    if (nearbyResistances.length > 0) {
-      chosenResistance = Math.max(...nearbyResistances);
-    }
+    const candidateHigh = validHighsAbove.length > 0 ? validHighsAbove[0].price : fallbackHigh;
+    const structuralHigh = candidateHigh;
+    const chosenResistance = structuralHigh;
 
-    if (htfHighs.length > 0) {
-      const nearbyHtfRes = htfHighs
-        .map((h) => h.price)
-        .filter((p) => p > entryPrice && Math.abs(p - entryPrice) / entryPrice < 0.035);
-      if (nearbyHtfRes.length > 0) {
-        const majorCeiling = Math.min(...nearbyHtfRes);
-        if (majorCeiling > candidateHigh && (majorCeiling - candidateHigh) / entryPrice < 0.008) {
-          chosenResistance = majorCeiling;
-        }
-      }
-    }
-
-    const structuralHigh = Math.max(candidateHigh, chosenResistance);
-
+    // Place stop loss at the top of the highest point of the 5-minute swing high
     const stopLoss = parseFloat((structuralHigh + buffer).toFixed(6));
     const riskDistance = parseFloat((stopLoss - entryPrice).toFixed(6));
     const riskPercent = (riskDistance / entryPrice) * 100;

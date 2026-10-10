@@ -70,6 +70,7 @@ import { DrawingAlertModal } from './drawing/DrawingAlertModal.tsx';
 import { DrawingManagerModal } from './drawing/DrawingManagerModal.tsx';
 import { AlertNotificationToast } from './drawing/AlertNotificationToast.tsx';
 import { ChartDrawing, ChartPoint } from '../types/drawings.ts';
+import { ScanAssetModal, SingleAssetEvaluation } from './scanner/ScanAssetModal.tsx';
 
 interface CandlestickChartProps {
   symbol: string;
@@ -279,7 +280,12 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     const handleSignalCleared = (e: any) => {
       const id = e.detail?.signalId;
       if (id) {
-        setClearedSignalIds((prev) => new Set(prev).add(id));
+        setClearedSignalIds((prev) => {
+          if (prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.add(id);
+          return next;
+        });
       }
     };
     window.addEventListener('nwwt_signal_cleared', handleSignalCleared);
@@ -476,9 +482,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   // Full Screen Chart Toggle (Instruction 4)
   const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
 
-  // Scan Market specifically for active chart asset (Instruction 7)
+  // Scan Asset specifically for active chart asset
   const [isScanningAsset, setIsScanningAsset] = useState<boolean>(false);
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
+  const [isScanModalOpen, setIsScanModalOpen] = useState<boolean>(false);
+  const [scanEvaluation, setScanEvaluation] = useState<SingleAssetEvaluation | null>(null);
 
   // Progressive Disclosure Accordions (Instruction 6 & Collapse details by default)
   const [isStructureDetailsOpen, setIsStructureDetailsOpen] = useState<boolean>(false);
@@ -496,6 +504,10 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       });
       const data = await res.json();
       if (data && data.result) {
+        if (data.result.evaluation) {
+          setScanEvaluation(data.result.evaluation);
+          setIsScanModalOpen(true);
+        }
         if (data.result.signal) {
           setScanFeedback(`Setup Identified on ${symbol}: ${data.result.signal.direction} (${data.result.signal.setupType})`);
         } else if (data.result.pendingRetest) {
@@ -2001,7 +2013,12 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
 
         {/* Active Signal HUD Banner */}
-        {activeSignal && activeSignal.entryPrice && !clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
+        {activeSignal &&
+        activeSignal.entryPrice &&
+        activeSignal.status === 'ACTIVE' &&
+        !activeSignal.isTradeComplete &&
+        !clearedSignalIds.has(activeSignal.id) &&
+        activeSignal.asset === symbol ? (
           <div className="px-3.5 py-1 bg-[#0d0f18] border-b border-[#1c1f2e] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shrink-0">
             <div className="flex items-center gap-3">
               <span className="flex items-center gap-1 font-bold text-amber-400">
@@ -2047,7 +2064,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               <span className="text-[10px] text-slate-500">{activeSignal.confidence}% Conf.</span>
             </div>
           </div>
-        ) : activeSignal && clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
+        ) : activeSignal &&
+          (clearedSignalIds.has(activeSignal.id) || activeSignal.isTradeComplete || activeSignal.status === 'LOSS' || activeSignal.status === 'WIN' || activeSignal.status === 'EXPIRED') &&
+          activeSignal.asset === symbol ? (
           <div className="px-3.5 py-1 bg-[#091414] border-b border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shrink-0">
             <div className="flex items-center gap-2">
               <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
@@ -2273,7 +2292,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Dedicated Scan Market Button (Requirement 7) */}
+            {/* Dedicated Scan Asset Button */}
             <button
               onClick={handleScanChartAsset}
               disabled={isScanningAsset}
@@ -2281,7 +2300,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               title={`Scan market structure on ${symbol} (${timeframe})`}
             >
               <Search className={`w-3 h-3 ${isScanningAsset ? 'animate-spin' : ''}`} />
-              <span>Scan Market</span>
+              <span>Scan Asset</span>
               <span className="text-[9.5px] bg-black/20 text-black px-1 rounded font-bold">
                 {symbol.replace(/USDT$/, '')}
               </span>
@@ -2290,7 +2309,12 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
 
         {/* Setup Condition Display (Answers "Is there a setup?" - Requirement 6) */}
-        {activeSignal && activeSignal.entryPrice && !clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
+        {activeSignal &&
+        activeSignal.entryPrice &&
+        activeSignal.status === 'ACTIVE' &&
+        !activeSignal.isTradeComplete &&
+        !clearedSignalIds.has(activeSignal.id) &&
+        activeSignal.asset === symbol ? (
           <div className="p-2 rounded bg-[#10131d] border border-amber-500/30 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
             <div className="flex items-center gap-2.5 flex-wrap">
               <span
@@ -2354,7 +2378,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               <span className="text-[10px] text-slate-400">{activeSignal.confidence}% Conf.</span>
             </div>
           </div>
-        ) : activeSignal && clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol ? (
+        ) : activeSignal &&
+          (clearedSignalIds.has(activeSignal.id) || activeSignal.isTradeComplete || activeSignal.status === 'LOSS' || activeSignal.status === 'WIN' || activeSignal.status === 'EXPIRED') &&
+          activeSignal.asset === symbol ? (
           <div className="p-2 rounded bg-[#091414] border border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
             <div className="flex items-center gap-2">
               <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
@@ -3049,6 +3075,17 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           onClose={() => setIsManagerModalOpen(false)}
         />
       )}
+
+      {/* Real-time Single Asset Evaluation Modal */}
+      <ScanAssetModal
+        isOpen={isScanModalOpen}
+        onClose={() => setIsScanModalOpen(false)}
+        isLoading={isScanningAsset}
+        evaluation={scanEvaluation}
+        asset={symbol}
+        timeframe={timeframe}
+        onRescan={handleScanChartAsset}
+      />
     </div>
   );
 };

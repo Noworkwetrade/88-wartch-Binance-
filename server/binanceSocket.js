@@ -122,7 +122,9 @@ class BinanceSocketManager {
       if (Array.isArray(data)) {
         // Array of 24hr tickers: [{ e: '24hrTicker', E: 167..., s: 'BTCUSDT', c: '...', ... }]
         for (const item of data) {
-          if (!item || !item.s || !item.s.endsWith('USDT') || isPermanentlyExcludedSymbol(item.s)) continue;
+          if (!item || !item.s) continue;
+          const isAllowedQuote = item.s.endsWith('USDT') || item.s.endsWith('USDC') || item.s.endsWith('USD');
+          if (!isAllowedQuote || isPermanentlyExcludedSymbol(item.s)) continue;
 
           const updated = marketCache.updateFromWs(item.s, item, item.E || Date.now());
           if (updated) {
@@ -135,14 +137,17 @@ class BinanceSocketManager {
             }
           }
         }
-      } else if (data && data.s && data.s.endsWith('USDT') && !isPermanentlyExcludedSymbol(data.s)) {
-        const updated = marketCache.updateFromWs(data.s, data, data.E || Date.now());
-        if (updated) {
-          for (const cb of this.onTickerCallbacks) {
-            try {
-              cb(updated);
-            } catch (e) {
-              // ignore
+      } else if (data && data.s) {
+        const isAllowedQuote = data.s.endsWith('USDT') || data.s.endsWith('USDC') || data.s.endsWith('USD');
+        if (isAllowedQuote && !isPermanentlyExcludedSymbol(data.s)) {
+          const updated = marketCache.updateFromWs(data.s, data, data.E || Date.now());
+          if (updated) {
+            for (const cb of this.onTickerCallbacks) {
+              try {
+                cb(updated);
+              } catch (e) {
+                // ignore
+              }
             }
           }
         }

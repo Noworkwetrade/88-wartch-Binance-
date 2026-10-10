@@ -48,13 +48,34 @@ async function binanceFetch(path, options = {}) {
 
 const PERMANENT_EXCLUDED_SYMBOLS = new Set(['USDCUSDT', 'USD1USDT', 'USDC', 'USD1']);
 
+/**
+ * Normalizes trading symbol inputs to standard Binance Spot format.
+ * Handles bare symbols (e.g. BTC -> BTCUSDT), slashes (BTC/USDT -> BTCUSDT),
+ * hyphens (BTC-USDC -> BTCUSDC), and respects USDT, USDC, and USD quote pairs.
+ */
+export function normalizeSymbol(rawSymbol) {
+  if (!rawSymbol) return 'BTCUSDT';
+  let s = String(rawSymbol).trim().toUpperCase();
+  s = s.replace(/[\/\-_\s]/g, '');
+  if (!s) return 'BTCUSDT';
+
+  // If already ends with supported quote asset
+  if (s.endsWith('USDT') || s.endsWith('USDC') || s.endsWith('USD')) {
+    return s;
+  }
+
+  // Bare base asset (e.g. BTC, ETH, SOL) defaults to USDT
+  return `${s}USDT`;
+}
+
 export function isPermanentlyExcludedSymbol(symbol) {
   if (!symbol) return false;
-  return PERMANENT_EXCLUDED_SYMBOLS.has(symbol.trim().toUpperCase());
+  const upper = String(symbol).trim().toUpperCase().replace(/[\/\-_\s]/g, '');
+  return PERMANENT_EXCLUDED_SYMBOLS.has(upper) || PERMANENT_EXCLUDED_SYMBOLS.has(upper + 'USDT');
 }
 
 /**
- * Fetches all active Binance Spot USDT trading pairs dynamically
+ * Fetches all active Binance Spot USDT, USDC, and USD trading pairs dynamically
  * GET /api/v3/exchangeInfo
  */
 export async function fetchExchangeInfo() {
@@ -64,12 +85,13 @@ export async function fetchExchangeInfo() {
       throw new Error('Invalid exchangeInfo response from Binance');
     }
 
-    // Filter strictly to active Spot USDT trading pairs, permanently excluding USDCUSDT and USD1USDT
-    const usdtSymbols = data.symbols.filter((item) => {
+    // Filter strictly to active Spot USDT, USDC, and USD trading pairs, permanently excluding stablecoin pairs like USDCUSDT
+    const spotSymbols = data.symbols.filter((item) => {
+      const isAllowedQuote = item && (item.quoteAsset === 'USDT' || item.quoteAsset === 'USDC' || item.quoteAsset === 'USD');
       return (
         item &&
         item.status === 'TRADING' &&
-        item.quoteAsset === 'USDT' &&
+        isAllowedQuote &&
         item.isSpotTradingAllowed !== false &&
         !isPermanentlyExcludedSymbol(item.symbol)
       );
@@ -78,7 +100,7 @@ export async function fetchExchangeInfo() {
     return {
       serverTime: data.serverTime || Date.now(),
       timezone: data.timezone || 'UTC',
-      symbols: usdtSymbols
+      symbols: spotSymbols
     };
   } catch (error) {
     console.error('[binanceRest] Error fetching exchangeInfo:', error.message);
@@ -95,8 +117,13 @@ export async function fetchSpotTickers() {
     const data = await binanceFetch('/api/v3/ticker/24hr');
     if (!Array.isArray(data)) return [];
 
-    // Filter only USDT pairs with valid prices, permanently excluding USDCUSDT and USD1USDT
-    return data.filter((item) => item && item.symbol && item.symbol.endsWith('USDT') && !isPermanentlyExcludedSymbol(item.symbol));
+    // Filter USDT, USDC, and USD pairs with valid prices, permanently excluding USDCUSDT and USD1USDT
+    return data.filter((item) => {
+      if (!item || !item.symbol) return false;
+      const s = item.symbol;
+      const hasAllowedQuote = s.endsWith('USDT') || s.endsWith('USDC') || s.endsWith('USD');
+      return hasAllowedQuote && !isPermanentlyExcludedSymbol(s);
+    });
   } catch (err) {
     console.warn('[binanceRest] Note fetching 24hr snapshot:', err.message);
     return [];
@@ -108,7 +135,7 @@ export async function fetchSpotTickers() {
  * GET /api/v3/klines?symbol=BTCUSDT&interval=15m&limit=250
  */
 export async function fetchKlines(symbol, interval = '15m', limit = 200) {
-  const cleanSymbol = (symbol || 'BTCUSDT').toUpperCase();
+  const cleanSymbol = normalizeSymbol(symbol || 'BTCUSDT');
   if (isPermanentlyExcludedSymbol(cleanSymbol)) {
     return [];
   }

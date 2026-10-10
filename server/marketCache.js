@@ -8,7 +8,24 @@
  * - Keeps the last known valid price during reconnects
  */
 
-import { isPermanentlyExcludedSymbol } from './binanceRest.js';
+import { isPermanentlyExcludedSymbol, normalizeSymbol } from './binanceRest.js';
+
+function extractBaseAndQuote(cleanSymbol, fallbackBase = '', fallbackQuote = '') {
+  if (fallbackBase && fallbackQuote) return { baseAsset: fallbackBase, quoteAsset: fallbackQuote };
+  let baseAsset = fallbackBase || cleanSymbol;
+  let quoteAsset = fallbackQuote || 'USDT';
+  if (cleanSymbol.endsWith('USDT')) {
+    baseAsset = cleanSymbol.slice(0, -4);
+    quoteAsset = 'USDT';
+  } else if (cleanSymbol.endsWith('USDC')) {
+    baseAsset = cleanSymbol.slice(0, -4);
+    quoteAsset = 'USDC';
+  } else if (cleanSymbol.endsWith('USD')) {
+    baseAsset = cleanSymbol.slice(0, -3);
+    quoteAsset = 'USD';
+  }
+  return { baseAsset, quoteAsset };
+}
 
 class MarketCache {
   constructor() {
@@ -34,10 +51,11 @@ class MarketCache {
       const sym = item.symbol;
       if (!sym || isPermanentlyExcludedSymbol(sym)) continue;
       if (!this.tickers.has(sym)) {
+        const { baseAsset, quoteAsset } = extractBaseAndQuote(sym, item.baseAsset, item.quoteAsset);
         this.tickers.set(sym, {
           symbol: sym,
-          baseAsset: item.baseAsset || '',
-          quoteAsset: item.quoteAsset || 'USDT',
+          baseAsset,
+          quoteAsset,
           lastPrice: '--',
           priceChange: '0.00',
           priceChangePercent: '0.00',
@@ -66,7 +84,7 @@ class MarketCache {
    */
   updateFromWs(symbol, raw, eventTime = 0) {
     if (!symbol) return null;
-    const cleanSymbol = symbol.toUpperCase();
+    const cleanSymbol = normalizeSymbol(symbol);
     if (isPermanentlyExcludedSymbol(cleanSymbol)) {
       this.tickers.delete(cleanSymbol);
       return null;
@@ -80,10 +98,12 @@ class MarketCache {
       return null;
     }
 
+    const { baseAsset, quoteAsset } = extractBaseAndQuote(cleanSymbol);
+
     const existing = this.tickers.get(cleanSymbol) || {
       symbol: cleanSymbol,
-      baseAsset: cleanSymbol.replace(/USDT$/, ''),
-      quoteAsset: 'USDT',
+      baseAsset,
+      quoteAsset,
       lastPrice: '--',
       priceChange: '0.00',
       priceChangePercent: '0.00',
@@ -177,13 +197,15 @@ class MarketCache {
 
     for (const item of rawTickersList) {
       if (!item || !item.symbol) continue;
-      const cleanSymbol = item.symbol.toUpperCase();
-      if (!cleanSymbol.endsWith('USDT') || isPermanentlyExcludedSymbol(cleanSymbol)) continue;
+      const cleanSymbol = normalizeSymbol(item.symbol);
+      const isAllowedQuote = cleanSymbol.endsWith('USDT') || cleanSymbol.endsWith('USDC') || cleanSymbol.endsWith('USD');
+      if (!isAllowedQuote || isPermanentlyExcludedSymbol(cleanSymbol)) continue;
 
       const restPrice = parseFloat(item.lastPrice);
       if (isNaN(restPrice) || restPrice <= 0) continue;
 
       const existing = this.tickers.get(cleanSymbol);
+      const { baseAsset, quoteAsset } = extractBaseAndQuote(cleanSymbol, existing?.baseAsset || item.baseAsset, existing?.quoteAsset || item.quoteAsset);
 
       // If we already have a live price from WebSocket received recently, DO NOT overwrite the price!
       const hasFreshWsPrice = existing && existing.lastWsUpdateTime > 0 && existing.lastPrice !== '--';
@@ -201,8 +223,8 @@ class MarketCache {
 
       const updated = {
         symbol: cleanSymbol,
-        baseAsset: existing?.baseAsset || cleanSymbol.replace(/USDT$/, ''),
-        quoteAsset: 'USDT',
+        baseAsset,
+        quoteAsset,
         lastPrice: lastPrice,
         priceChange: priceChange,
         priceChangePercent: priceChangePercent,
@@ -239,8 +261,10 @@ class MarketCache {
   }
 
   getTicker(symbol) {
-    if (!symbol || isPermanentlyExcludedSymbol(symbol)) return null;
-    return this.tickers.get(symbol?.toUpperCase()) || null;
+    if (!symbol) return null;
+    const cleanSymbol = normalizeSymbol(symbol);
+    if (isPermanentlyExcludedSymbol(cleanSymbol)) return null;
+    return this.tickers.get(cleanSymbol) || null;
   }
 
   getAllTickers() {

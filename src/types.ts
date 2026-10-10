@@ -225,6 +225,21 @@ export interface ScannerSignalItem {
       overlapRatio: number;
     };
   };
+  // Higher Timeframe (HTF) Confirmation Extensions
+  htfConfirmation?: {
+    enabled: boolean;
+    ruleMode: 'lenient' | 'aligned' | 'strict';
+    htfTimeframe?: Timeframe;
+    htfRegime?: MarketRegime;
+    htfTrendDirection?: 'bullish' | 'bearish' | 'neutral';
+    status: 'confirmed' | 'rejected' | 'neutral';
+    reason: string;
+    metrics?: {
+      higherTfRegime?: MarketRegime;
+      higherTfTrend?: string;
+      entryTimeframe: Timeframe;
+    };
+  };
 }
 
 export interface PendingRetestItem {
@@ -344,4 +359,18 @@ export interface ScannerState {
   completedCount?: number;
   pendingRetests: PendingRetestItem[];
   performance?: SignalPerformanceStats;
+  // Multi-Timeframe and Fair Coverage Metrics
+  htfConfirmationEnabled?: boolean;
+  htfTimeframe?: Timeframe;
+  htfRuleMode?: 'lenient' | 'aligned' | 'strict';
+  coverageMetrics?: {
+    totalEligibleSymbols: number;
+    batchSize: number;
+    batchIndex: number;
+    totalBatches: number;
+    cycleDurationMs: number;
+    estFullRotationSeconds: number;
+    coveragePercent: number;
+    lastBatchCompletedAt?: number;
+  };
 }

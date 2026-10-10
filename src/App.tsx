@@ -35,6 +35,7 @@ export default function App() {
     ticksPerSecond,
     scannerState,
     triggerScan,
+    updateScannerConfig,
     reconnectBackend
   } = useBinanceMarket();
 
@@ -208,13 +209,19 @@ export default function App() {
         (s.status === 'ACTIVE' || (s.tp1Hit && !s.isTradeComplete)) &&
         !clearedSet.has(s.id) &&
         s.modelType !== 'inverse' &&
-        s.modelType !== 'ai_filtered_inverse'
+        s.modelType !== 'ai_filtered_inverse' &&
+        !completedSignals.some(
+          (c) =>
+            c.asset === s.asset &&
+            c.timeframe === s.timeframe &&
+            (c.confirmedCandleCloseTime === s.confirmedCandleCloseTime || c.timestamp === s.timestamp)
+        )
     );
     // Prioritize AI Filtered setup if available, otherwise original
     const aiFiltered = activeList.find((s) => s.modelType === 'ai_filtered');
     if (aiFiltered) return aiFiltered;
     return activeList[0] || null;
-  }, [activeSignals, selectedSymbolName]);
+  }, [activeSignals, completedSignals, selectedSymbolName]);
 
   // Open asset chart on asset click (used by Watchlist & Scanner)
   const handleSelectAsset = useCallback((symbol: string) => {
@@ -223,6 +230,13 @@ export default function App() {
     // On mobile, automatically switch to Chart tab
     setActiveTab('chart');
   }, []);
+
+  // Synchronized entry timeframe change handler across chart and scanner engine
+  const handleTimeframeChange = useCallback((tf: Timeframe) => {
+    setSelectedTimeframe(tf);
+    updateScannerConfig({ timeframe: tf });
+    triggerScan(tf);
+  }, [updateScannerConfig, triggerScan]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[#070709] text-white overflow-hidden font-sans antialiased">
@@ -305,8 +319,9 @@ export default function App() {
                 scannerState={scannerState}
                 selectedAsset={selectedSymbolName}
                 onSelectAsset={handleSelectAsset}
-                onTimeframeChange={(tf) => setSelectedTimeframe(tf)}
+                onTimeframeChange={handleTimeframeChange}
                 onTriggerScan={(tf) => triggerScan(tf || selectedTimeframe)}
+                onUpdateScannerConfig={updateScannerConfig}
                 performanceSignals={performanceSignals}
                 activeSignals={activeSignals}
                 completedSignals={completedSignals}
@@ -324,7 +339,7 @@ export default function App() {
             symbol={selectedSymbolName || 'BTCUSDT'}
             ticker={selectedTicker}
             timeframe={selectedTimeframe}
-            onTimeframeChange={setSelectedTimeframe}
+            onTimeframeChange={handleTimeframeChange}
             onSelectSymbol={handleSelectAsset}
             allSymbols={tickersList}
             activeSignal={activeSignalForAsset}
@@ -361,8 +376,9 @@ export default function App() {
               scannerState={scannerState}
               selectedAsset={selectedSymbolName}
               onSelectAsset={handleSelectAsset}
-              onTimeframeChange={(tf) => setSelectedTimeframe(tf)}
+              onTimeframeChange={handleTimeframeChange}
               onTriggerScan={(tf) => triggerScan(tf || selectedTimeframe)}
+              onUpdateScannerConfig={updateScannerConfig}
               performanceSignals={performanceSignals}
               activeSignals={activeSignals}
               completedSignals={completedSignals}
@@ -379,7 +395,7 @@ export default function App() {
               symbol={selectedSymbolName || 'BTCUSDT'}
               ticker={selectedTicker}
               timeframe={selectedTimeframe}
-              onTimeframeChange={setSelectedTimeframe}
+              onTimeframeChange={handleTimeframeChange}
               onSelectSymbol={handleSelectAsset}
               allSymbols={tickersList}
               activeSignal={activeSignalForAsset}

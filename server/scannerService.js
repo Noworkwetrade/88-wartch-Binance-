@@ -27,8 +27,9 @@
  * - Educational market analysis only. Never provides automated trade execution.
  */
 
-import { fetchKlines } from './binanceRest.js';
+import { fetchKlines, normalizeSymbol } from './binanceRest.js';
 import { marketCache } from './marketCache.js';
+import { symbolManager } from './symbolManager.js';
 import {
   detectMarketRegime,
   validateSetupWithStructureIntelligence,
@@ -52,7 +53,7 @@ const PRIORITY_SYMBOLS = [
   'TIAUSDT', 'RENDERUSDT', 'INJUSDT', 'SEIUSDT', 'WLDUSDT'
 ];
 
-function getTimeframeMinutes(tf) {
+export function getTimeframeMinutes(tf) {
   switch (tf) {
     case '1m': return 1;
     case '5m': return 5;
@@ -70,10 +71,152 @@ function getTimeframeMinutes(tf) {
   }
 }
 
+/**
+ * Returns the logical higher timeframe for a given entry timeframe
+ */
+export function getLogicalHigherTimeframe(entryTf) {
+  switch (entryTf) {
+    case '1m': return '5m';
+    case '5m': return '15m';
+    case '15m': return '1h';
+    case '30m': return '2h';
+    case '1h': return '4h';
+    case '2h': return '6h';
+    case '4h': return '1d';
+    case '6h': return '1d';
+    case '8h': return '1d';
+    case '12h': return '1d';
+    case '1d': return '1w';
+    case '1w': return '1M';
+    default: return '1h';
+  }
+}
+
+/**
+ * Evaluates Higher Timeframe (HTF) trend & regime confirmation
+ * Rule modes:
+ * - lenient: Not hard opposed (e.g. neutral, ranging, low_volatility allowed)
+ * - aligned: Trend direction must directly match setup direction
+ * - strict: Aligned trend AND regime is not in conflicting transition/reversal
+ */
+export function evaluateHtfConfirmation({ setupDirection, entryTimeframe, htfTimeframe, htfClosedCandles, ruleMode = 'lenient' }) {
+  if (!htfClosedCandles || htfClosedCandles.length < 10) {
+    return {
+      status: 'rejected',
+      reason: `Insufficient higher timeframe (${htfTimeframe}) candle history for confirmation.`,
+      metrics: { entryTimeframe, higherTfTimeframe: htfTimeframe }
+    };
+  }
+
+  const htfRegimeData = detectMarketRegime(htfClosedCandles);
+  const trendDir = htfRegimeData.trendDirection || 'neutral';
+  const regime = htfRegimeData.regime || 'ranging';
+
+  const isBullish = trendDir === 'bullish';
+  const isBearish = trendDir === 'bearish';
+  const isNeutral = trendDir === 'neutral';
+
+  const wantsUp = setupDirection === 'UP';
+  const wantsDown = setupDirection === 'DOWN';
+
+  if (ruleMode === 'strict') {
+    if (wantsUp && isBullish && regime !== 'transition') {
+      return {
+        status: 'confirmed',
+        htfTimeframe,
+        htfRegime: regime,
+        htfTrendDirection: trendDir,
+        reason: `Strict HTF Confluence: ${htfTimeframe} trend is bullish with aligned regime (${regime}).`,
+        metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+      };
+    }
+    if (wantsDown && isBearish && regime !== 'transition') {
+      return {
+        status: 'confirmed',
+        htfTimeframe,
+        htfRegime: regime,
+        htfTrendDirection: trendDir,
+        reason: `Strict HTF Confluence: ${htfTimeframe} trend is bearish with aligned regime (${regime}).`,
+        metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+      };
+    }
+    return {
+      status: 'rejected',
+      htfTimeframe,
+      htfRegime: regime,
+      htfTrendDirection: trendDir,
+      reason: `Strict HTF Filter: ${htfTimeframe} trend (${trendDir}) or regime (${regime}) does not strictly match ${setupDirection} setup.`,
+      metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+    };
+  }
+
+  if (ruleMode === 'aligned') {
+    if (wantsUp && isBullish) {
+      return {
+        status: 'confirmed',
+        htfTimeframe,
+        htfRegime: regime,
+        htfTrendDirection: trendDir,
+        reason: `Aligned HTF Confluence: ${htfTimeframe} trend direction is bullish.`,
+        metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+      };
+    }
+    if (wantsDown && isBearish) {
+      return {
+        status: 'confirmed',
+        htfTimeframe,
+        htfRegime: regime,
+        htfTrendDirection: trendDir,
+        reason: `Aligned HTF Confluence: ${htfTimeframe} trend direction is bearish.`,
+        metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+      };
+    }
+    return {
+      status: 'rejected',
+      htfTimeframe,
+      htfRegime: regime,
+      htfTrendDirection: trendDir,
+      reason: `Aligned HTF Filter: ${htfTimeframe} trend is ${trendDir}, not aligned with ${setupDirection} setup.`,
+      metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+    };
+  }
+
+  // 'lenient' mode: setup is approved unless HTF is directly opposed
+  if (wantsUp && isBearish) {
+    return {
+      status: 'rejected',
+      htfTimeframe,
+      htfRegime: regime,
+      htfTrendDirection: trendDir,
+      reason: `HTF Filter Rejection: ${htfTimeframe} trend is directly bearish opposing UP setup.`,
+      metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+    };
+  }
+  if (wantsDown && isBullish) {
+    return {
+      status: 'rejected',
+      htfTimeframe,
+      htfRegime: regime,
+      htfTrendDirection: trendDir,
+      reason: `HTF Filter Rejection: ${htfTimeframe} trend is directly bullish opposing DOWN setup.`,
+      metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+    };
+  }
+
+  return {
+    status: 'confirmed',
+    htfTimeframe,
+    htfRegime: regime,
+    htfTrendDirection: trendDir,
+    reason: `Lenient HTF Confluence: ${htfTimeframe} trend (${trendDir}) is not opposed to ${setupDirection}.`,
+    metrics: { entryTimeframe, higherTfRegime: regime, higherTfTrend: trendDir }
+  };
+}
+
 class ScannerService {
   constructor() {
     this.status = 'ready'; // 'ready' | 'scanning' | 'idle'
-    this.timeframe = '15m';
+    this.timeframe = '15m'; // Entry timeframe
     this.signals = []; // Active/recent signals from current scan
     this.pendingRetests = [];
     this.scannedCount = 0;
@@ -82,6 +225,25 @@ class ScannerService {
     this.watchInterval = null;
     this.isScanning = false;
     this.onUpdate = null;
+
+    // Multi-Timeframe Confirmation Settings
+    this.htfConfirmationEnabled = false;
+    this.htfTimeframe = '1h';
+    this.htfRuleMode = 'lenient'; // 'lenient' | 'aligned' | 'strict'
+
+    // Fair Rotation Scanner State
+    this.currentBatchCursor = 0;
+    this.batchSize = 25; // Evaluates 25 pairs per cycle to respect Binance REST limit
+    this.coverageStats = {
+      totalEligibleSymbols: 0,
+      batchSize: 25,
+      batchIndex: 0,
+      totalBatches: 1,
+      cycleDurationMs: 0,
+      estFullRotationSeconds: 0,
+      coveragePercent: 0,
+      lastBatchCompletedAt: 0
+    };
 
     // In-Memory Performance History: Map of id -> ScannerSignalItem
     this.performanceSignals = new Map();
@@ -144,8 +306,10 @@ class ScannerService {
     timestamp,
     confirmedCandleCloseTime,
     closedCandles,
+    fiveMinCandles,
     regimeData,
-    marketStructureQuality
+    marketStructureQuality,
+    htfConfirmation = null
   }) {
     const structureLevels = calculateMarketStructureLevels({
       symbol,
@@ -153,6 +317,7 @@ class ScannerService {
       direction,
       entryPrice: closePrice,
       candles: closedCandles,
+      fiveMinCandles,
       setupType
     });
 
@@ -181,7 +346,8 @@ class ScannerService {
       confirmedCandleCloseTime,
       modelType: 'original',
       marketRegime: regimeData.regime,
-      marketStructureQuality
+      marketStructureQuality,
+      htfConfirmation
     });
   }
 
@@ -204,6 +370,7 @@ class ScannerService {
     aiValidation = null,
     signalConditions = null,
     marketStructureQuality = null,
+    htfConfirmation = null,
     // Structure-based levels
     stopLoss: customStopLoss,
     takeProfit1: customTakeProfit1,
@@ -289,7 +456,8 @@ class ScannerService {
       marketRegime,
       aiValidation,
       signalConditions,
-      marketStructureQuality
+      marketStructureQuality,
+      htfConfirmation
     };
   }
 
@@ -533,20 +701,52 @@ class ScannerService {
     this.isScanning = true;
     this.status = 'scanning';
     this.timeframe = timeframe;
+    const scanStartTime = Date.now();
 
     try {
-      const allTickers = marketCache.getAllTickers();
-      const topSymbols = allTickers
-        .filter((t) => t.lastPrice !== '--')
-        .sort((a, b) => (parseFloat(b.quoteVolume) || 0) - (parseFloat(a.quoteVolume) || 0))
-        .map((t) => t.symbol);
+      // 1. Gather all eligible Binance Spot USDT pairs
+      if (!symbolManager.symbolNames || symbolManager.symbolNames.length === 0) {
+        try {
+          await symbolManager.loadSymbols();
+        } catch (err) {
+          console.warn('[scannerService] Symbol load error during runScan, using cached tickers:', err.message);
+        }
+      }
 
-      const rawList = Array.from(new Set([...PRIORITY_SYMBOLS, ...topSymbols.slice(0, 35)]));
-      const scanList = rawList.filter((s) => !isPermanentlyExcludedSymbol(s)).slice(0, 30);
+      const allLoaded = symbolManager.symbolNames && symbolManager.symbolNames.length > 0
+        ? symbolManager.symbolNames
+        : marketCache.getAllTickers().map((t) => t.symbol);
+
+      const eligibleList = allLoaded.filter(
+        (s) => s && s.endsWith('USDT') && !isPermanentlyExcludedSymbol(s)
+      );
+
+      const totalEligible = eligibleList.length || 1;
+      const batchSize = this.batchSize || 25;
+      const totalBatches = Math.ceil(totalEligible / batchSize);
+
+      // Rotate fair round-robin cursor across full universe
+      if (this.currentBatchCursor >= totalEligible) {
+        this.currentBatchCursor = 0;
+      }
+
+      const startIndex = this.currentBatchCursor;
+      const endIndex = Math.min(startIndex + batchSize, totalEligible);
+      const rotatingBatch = eligibleList.slice(startIndex, endIndex);
+
+      // Always include top 2 reference anchors (BTCUSDT, ETHUSDT) if not already in batch
+      // so benchmark market leadership is consistently monitored without starving alts
+      const scanList = Array.from(new Set(['BTCUSDT', 'ETHUSDT', ...rotatingBatch]));
+
+      // Advance cursor for next scheduled cycle
+      this.currentBatchCursor = endIndex >= totalEligible ? 0 : endIndex;
 
       const pendingSetups = [];
       let processed = 0;
       const now = Date.now();
+
+      // Determine Higher Timeframe if confirmation is enabled
+      const htfTf = this.htfTimeframe || getLogicalHigherTimeframe(timeframe);
 
       for (const symbol of scanList) {
         if (isPermanentlyExcludedSymbol(symbol)) continue;
@@ -556,8 +756,6 @@ class ScannerService {
 
           // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
           // Never generate or display a signal while the current candlestick is still forming.
-          // Discard any unfinished candle whose closeTime > now or openTime + duration > now,
-          // as well as future candles, estimated prices, or unclosed flags.
           const tfDuration = (getTimeframeMinutes(timeframe) || 15) * 60 * 1000;
           const closedCandles = (rawCandles || []).filter((c) => {
             if (!c || isNaN(c.close) || c.close <= 0) return false;
@@ -573,7 +771,6 @@ class ScannerService {
 
           const lastClosedCandle = closedCandles[closedCandles.length - 1];
           const confirmedCandleCloseTime = lastClosedCandle.closeTime;
-
           const currentPrice = lastClosedCandle.close;
 
           // 1. EVALUATE MARKET STRUCTURE QUALITY LAYER BEFORE STRATEGY ANALYSIS
@@ -581,24 +778,93 @@ class ScannerService {
           this.qualityDiagnostics.set(`${symbol}-${timeframe}`, qualityResult);
 
           if (!qualityResult.isTradable) {
-            // Asset fails quality layer - strategy, entry, SL, TP, RR must NEVER run!
-            // Do not generate signal, do not add to performance, do not treat as loss.
             processed++;
             continue;
           }
 
-          // STRICT REQUIREMENT 1 & 4: Prevent duplicate signals from being generated from the same closed candle.
-          // If a signal was already generated or settled from this exact closed candle, skip.
+          // STRICT REQUIREMENT 1 & 4: Prevent duplicate signals from same closed candle
           if (this.hasSignalForCandle(symbol, timeframe, confirmedCandleCloseTime)) {
             processed++;
             continue;
           }
 
-          const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
+          let fiveMinCandles = null;
+          if (timeframe === '5m') {
+            fiveMinCandles = closedCandles;
+          } else {
+            try {
+              const raw5m = await fetchKlines(symbol, '5m', 50);
+              if (Array.isArray(raw5m) && raw5m.length >= 5) {
+                fiveMinCandles = raw5m.filter((c) => {
+                  if (!c || isNaN(c.close) || c.close <= 0) return false;
+                  const effClose = c.closeTime || (c.openTime + 5 * 60 * 1000 - 1);
+                  return effClose <= now && (c.openTime + 5 * 60 * 1000) <= now;
+                });
+              }
+            } catch (e) {
+              // fallback
+            }
+          }
 
-          // Register ONE legitimate buy or sell signal based on existing strategy and market structure logic
-          // NEVER flip into opposite direction or register inverse flipped signals
-          const signalToRegister = analysis.aiFilteredSignal || analysis.originalSignal;
+          // Optional Higher Timeframe Confirmation Retrieval
+          let htfConfirmation = null;
+          if (this.htfConfirmationEnabled) {
+            try {
+              const rawHtf = await fetchKlines(symbol, htfTf, 50);
+              const htfDurationMs = (getTimeframeMinutes(htfTf) || 60) * 60 * 1000;
+              const htfClosed = (rawHtf || []).filter((c) => {
+                if (!c || isNaN(c.close) || c.close <= 0) return false;
+                const eff = c.closeTime || (c.openTime + htfDurationMs - 1);
+                return eff <= now && (c.openTime + htfDurationMs) <= now;
+              });
+
+              if (htfClosed.length >= 10) {
+                htfConfirmation = evaluateHtfConfirmation({
+                  setupDirection: 'UP', // dynamic check updated below per candidate direction
+                  entryTimeframe: timeframe,
+                  htfTimeframe: htfTf,
+                  htfClosedCandles: htfClosed,
+                  ruleMode: this.htfRuleMode || 'lenient'
+                });
+              }
+            } catch (htfErr) {
+              // fallback if HTF data fetch fails
+            }
+          }
+
+          const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice, fiveMinCandles, htfConfirmation);
+
+          // If HTF confirmation is active, verify candidate signal passes HTF rule
+          let signalToRegister = analysis.aiFilteredSignal || analysis.originalSignal;
+          if (signalToRegister && this.htfConfirmationEnabled) {
+            // Re-evaluate HTF confirmation against actual candidate setup direction
+            try {
+              const rawHtf = await fetchKlines(symbol, htfTf, 50);
+              const htfDurationMs = (getTimeframeMinutes(htfTf) || 60) * 60 * 1000;
+              const htfClosed = (rawHtf || []).filter((c) => {
+                if (!c || isNaN(c.close) || c.close <= 0) return false;
+                const eff = c.closeTime || (c.openTime + htfDurationMs - 1);
+                return eff <= now && (c.openTime + htfDurationMs) <= now;
+              });
+
+              if (htfClosed.length >= 10) {
+                const specificHtfCheck = evaluateHtfConfirmation({
+                  setupDirection: signalToRegister.direction,
+                  entryTimeframe: timeframe,
+                  htfTimeframe: htfTf,
+                  htfClosedCandles: htfClosed,
+                  ruleMode: this.htfRuleMode || 'lenient'
+                });
+                signalToRegister.htfConfirmation = specificHtfCheck;
+                if (specificHtfCheck.status === 'rejected') {
+                  signalToRegister = null; // Filtered out by higher timeframe disagreement
+                }
+              }
+            } catch (e) {
+              // keep existing
+            }
+          }
+
           if (signalToRegister) {
             this.registerSignalSafely(signalToRegister);
           }
@@ -616,6 +882,23 @@ class ScannerService {
       this.scannedCount = processed;
       this.lastScanTime = Date.now();
       this.status = 'ready';
+
+      // Update fair coverage statistics
+      const cycleDurationMs = Date.now() - scanStartTime;
+      const currentBatchNum = Math.floor(startIndex / batchSize) + 1;
+      const estFullRotationSeconds = Math.round(totalBatches * 45);
+      const coveragePercent = Math.min(100, Math.round((endIndex / totalEligible) * 100));
+
+      this.coverageStats = {
+        totalEligibleSymbols: totalEligible,
+        batchSize,
+        batchIndex: currentBatchNum,
+        totalBatches,
+        cycleDurationMs,
+        estFullRotationSeconds,
+        coveragePercent,
+        lastBatchCompletedAt: Date.now()
+      };
 
       this.syncActiveSignalsArray();
       this.watchActiveSignals();
@@ -635,7 +918,15 @@ class ScannerService {
     if (!signal || !signal.id) return;
     const existing = this.performanceSignals.get(signal.id);
     if (!existing) {
-      this.performanceSignals.set(signal.id, signal);
+      // Prevent duplicate or stale signals from the same closed candle across identical asset/timeframe
+      const hasExistingCandle = Array.from(this.performanceSignals.values()).some((s) =>
+        s.asset === signal.asset &&
+        s.timeframe === signal.timeframe &&
+        (s.confirmedCandleCloseTime === signal.confirmedCandleCloseTime || s.timestamp === signal.timestamp)
+      );
+      if (!hasExistingCandle) {
+        this.performanceSignals.set(signal.id, signal);
+      }
     }
   }
 
@@ -644,8 +935,9 @@ class ScannerService {
    * Does NOT scan a random asset. Does NOT switch the selected asset.
    * Uses strictly real closed candles and live market data.
    */
-  async scanSingleAsset(symbol, timeframe = '15m') {
-    if (!symbol) return null;
+  async scanSingleAsset(rawSymbol, timeframe = '15m') {
+    if (!rawSymbol) return null;
+    const symbol = normalizeSymbol(rawSymbol);
 
     // Permanently excluded assets must never receive strategy analysis
     if (isPermanentlyExcludedSymbol(symbol)) {
@@ -696,7 +988,41 @@ class ScannerService {
       const confirmedCandleCloseTime = lastClosedCandle.closeTime;
       const currentPrice = lastClosedCandle.close;
 
-      const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice);
+      let fiveMinCandles = null;
+      if (timeframe === '5m') {
+        fiveMinCandles = closedCandles;
+      } else {
+        try {
+          const raw5m = await fetchKlines(symbol, '5m', 50);
+          if (Array.isArray(raw5m) && raw5m.length >= 5) {
+            fiveMinCandles = raw5m.filter((c) => {
+              if (!c || isNaN(c.close) || c.close <= 0) return false;
+              const effClose = c.closeTime || (c.openTime + 5 * 60 * 1000 - 1);
+              return effClose <= now && (c.openTime + 5 * 60 * 1000) <= now;
+            });
+          }
+        } catch (e) {
+          // fallback
+        }
+      }
+
+      // Higher timeframe analysis context
+      const htfTf = this.htfTimeframe || getLogicalHigherTimeframe(timeframe);
+      let htfClosedCandles = null;
+      let htfEvaluation = null;
+      try {
+        const rawHtf = await fetchKlines(symbol, htfTf, 50);
+        const htfDurationMs = (getTimeframeMinutes(htfTf) || 60) * 60 * 1000;
+        htfClosedCandles = (rawHtf || []).filter((c) => {
+          if (!c || isNaN(c.close) || c.close <= 0) return false;
+          const eff = c.closeTime || (c.openTime + htfDurationMs - 1);
+          return eff <= now && (c.openTime + htfDurationMs) <= now;
+        });
+      } catch (e) {
+        // fallback
+      }
+
+      const analysis = this.analyzeCandles(symbol, timeframe, closedCandles, currentPrice, fiveMinCandles);
 
       if (analysis.qualityResult && !analysis.qualityResult.isTradable) {
         return {
@@ -712,13 +1038,68 @@ class ScannerService {
           aiFilteredInverseSignal: null,
           pendingRetest: null,
           message: `Market Structure Quality: ${analysis.qualityResult.qualityGrade.toUpperCase()} (${analysis.qualityResult.qualityScore}/100). ${analysis.qualityResult.rejectionReason}`,
-          scannedAt: Date.now()
+          scannedAt: Date.now(),
+          evaluation: {
+            asset: symbol,
+            timeframe,
+            currentPrice,
+            marketStructure: {
+              regime: analysis.regimeData?.regime || 'Poor / Untradable',
+              qualityGrade: analysis.qualityResult.qualityGrade,
+              qualityScore: analysis.qualityResult.qualityScore,
+              isTradable: false,
+              summary: analysis.qualityResult.rejectionReason
+            },
+            formingSetup: {
+              detected: false,
+              type: 'None',
+              description: 'Market structure quality filter rejected asset. Structure is too noisy, choppy, or compressed.',
+              ruleNote: 'Forming setup does not equal a signal. No signal before the required candle closes.',
+              status: 'REJECTED BY QUALITY LAYER'
+            },
+            confirmedSetup: {
+              isConfirmed: false,
+              setupType: 'None - No Valid Setup Found',
+              direction: null,
+              confirmedAtCloseTime: confirmedCandleCloseTime
+            },
+            strongestStrategy: {
+              name: 'None qualifying',
+              confidence: 0,
+              status: 'REJECTED BY QUALITY LAYER'
+            },
+            action: 'NO SETUP',
+            actionLabel: 'NO VALID SETUP FOUND',
+            exactReason: analysis.qualityResult.rejectionReason,
+            rejectionOrAcceptanceStatus: 'REJECTED (MARKET STRUCTURE QUALITY)',
+            tradeLevels: null
+          }
         };
       }
 
+      // Check candidate signal with HTF if enabled
+      let confirmedSignal = analysis.aiFilteredSignal || analysis.originalSignal;
+      let htfStatusReason = '';
+      if (confirmedSignal && this.htfConfirmationEnabled && htfClosedCandles) {
+        htfEvaluation = evaluateHtfConfirmation({
+          setupDirection: confirmedSignal.direction,
+          entryTimeframe: timeframe,
+          htfTimeframe: htfTf,
+          htfClosedCandles,
+          ruleMode: this.htfRuleMode || 'lenient'
+        });
+        confirmedSignal.htfConfirmation = htfEvaluation;
+
+        if (htfEvaluation.status === 'rejected') {
+          htfStatusReason = `Higher Timeframe Filter Rejected: ${htfEvaluation.reason}`;
+          confirmedSignal = null; // Rejected by higher timeframe confirmation
+        }
+      }
+
       // Register ONE legitimate buy or sell signal based on existing strategy
-      const signalToRegister = analysis.aiFilteredSignal || analysis.originalSignal;
-      if (signalToRegister) this.registerSignalSafely(signalToRegister);
+      if (confirmedSignal && !this.hasSignalForCandle(symbol, timeframe, confirmedCandleCloseTime)) {
+        this.registerSignalSafely(confirmedSignal);
+      }
 
       this.syncActiveSignalsArray();
       this.watchActiveSignals();
@@ -732,7 +1113,135 @@ class ScannerService {
           analysis.pendingRetest,
           ...this.pendingRetests.filter((p) => p.asset !== symbol)
         ];
+      } else {
+        this.pendingRetests = this.pendingRetests.filter((p) => p.asset !== symbol);
       }
+
+      // Extract key structural swings and S/R clusters from closed candles
+      const swingHighs = [];
+      const swingLows = [];
+      for (let i = 2; i < closedCandles.length - 2; i++) {
+        const cur = closedCandles[i];
+        const p1 = closedCandles[i - 1];
+        const p2 = closedCandles[i - 2];
+        const n1 = closedCandles[i + 1];
+        const n2 = closedCandles[i + 2];
+        if (cur.high > p1.high && cur.high > p2.high && cur.high > n1.high && cur.high > n2.high) {
+          swingHighs.push({ price: cur.high, time: cur.openTime });
+        }
+        if (cur.low < p1.low && cur.low < p2.low && cur.low < n1.low && cur.low < n2.low) {
+          swingLows.push({ price: cur.low, time: cur.openTime });
+        }
+      }
+
+      const confirmedSwingHigh = swingHighs.length > 0
+        ? swingHighs[swingHighs.length - 1].price
+        : Math.max(...closedCandles.slice(-15).map((c) => c.high));
+      const confirmedSwingLow = swingLows.length > 0
+        ? swingLows[swingLows.length - 1].price
+        : Math.min(...closedCandles.slice(-15).map((c) => c.low));
+
+      // Key structural support is strictly at or below currentPrice
+      const validSupports = swingLows
+        .map((s) => s.price)
+        .filter((p) => p <= currentPrice);
+      const structuralSupport = validSupports.length > 0
+        ? Math.max(...validSupports)
+        : Math.min(...closedCandles.slice(-25).map((c) => c.low));
+
+      // Key structural resistance is strictly at or above currentPrice
+      const validResistances = swingHighs
+        .map((s) => s.price)
+        .filter((p) => p >= currentPrice);
+      const structuralResistance = validResistances.length > 0
+        ? Math.min(...validResistances)
+        : Math.max(...closedCandles.slice(-25).map((c) => c.high));
+
+      // Inspect currently forming candle (rawCandles last item)
+      const rawLast = rawCandles[rawCandles.length - 1];
+      const isRawLastForming = rawLast && (rawLast.isClosed === false || rawLast.closeTime > now || (rawLast.openTime + tfDuration > now));
+      const formingCandle = isRawLastForming ? rawLast : null;
+
+      let isFormingSetup = false;
+      let formingSetupType = 'None';
+      let formingSetupDesc = `Current open candle ($${currentPrice.toFixed(2)}) is fluctuating within structural boundaries (Support: $${structuralSupport.toFixed(2)} - Resistance: $${structuralResistance.toFixed(2)}).`;
+
+      if (formingCandle) {
+        if (lastClosedCandle.close <= structuralResistance && formingCandle.close > structuralResistance) {
+          isFormingSetup = true;
+          formingSetupType = 'Breakout Probing Resistance';
+          formingSetupDesc = `Current open candle is actively probing above swing resistance ($${structuralResistance.toFixed(2)}) at $${formingCandle.close.toFixed(2)}. Unconfirmed until candle closes.`;
+        } else if (lastClosedCandle.close >= structuralSupport && formingCandle.close < structuralSupport) {
+          isFormingSetup = true;
+          formingSetupType = 'Breakdown Probing Support';
+          formingSetupDesc = `Current open candle is actively probing below swing support ($${structuralSupport.toFixed(2)}) at $${formingCandle.close.toFixed(2)}. Unconfirmed until candle closes.`;
+        } else if (analysis.pendingRetest) {
+          isFormingSetup = true;
+          formingSetupType = 'Pullback / Retest in Progress';
+          formingSetupDesc = `Price is currently testing level $${analysis.pendingRetest.targetLevel.toFixed(2)}. Awaiting candle close confirmation.`;
+        }
+      }
+
+      let exactReason = '';
+      if (confirmedSignal) {
+        exactReason = confirmedSignal.reason;
+      } else if (htfStatusReason) {
+        exactReason = htfStatusReason;
+      } else {
+        const c0 = closedCandles[closedCandles.length - 1];
+        const failedBreakRetest = `Break & Retest: No confirmed retest rejection of previous breakout level ($${structuralResistance.toFixed(2)} / $${structuralSupport.toFixed(2)}).`;
+        const failedBOS = `Strong Breakout (BOS): Closed candle ($${c0.close.toFixed(2)}) did not close with decisive breakout momentum outside structure.`;
+        const failedFakeout = `Fakeout Rejection: No liquidity sweep with >45% opposite wick absorption.`;
+        const failedEngulfing = `Engulfing Confirmation: Closed candle does not engulf previous body at key structure.`;
+        exactReason = `No existing strategy qualified on the confirmed candle close.\n• ${failedBreakRetest}\n• ${failedBOS}\n• ${failedFakeout}\n• ${failedEngulfing}`;
+      }
+
+      const evaluation = {
+        asset: symbol,
+        timeframe,
+        currentPrice,
+        marketStructure: {
+          regime: analysis.regimeData?.regime || 'Ranging',
+          qualityGrade: analysis.qualityResult?.qualityGrade || 'ACCEPTABLE',
+          qualityScore: analysis.qualityResult?.qualityScore || 0,
+          isTradable: analysis.qualityResult?.isTradable ?? true,
+          swingHigh: confirmedSwingHigh,
+          swingLow: confirmedSwingLow,
+          support: structuralSupport,
+          resistance: structuralResistance,
+          summary: analysis.qualityResult?.rejectionReason || `Market regime is ${analysis.regimeData?.regime || 'ranging'}. Quality score is ${analysis.qualityResult?.qualityScore || 0}/100 (${analysis.qualityResult?.qualityGrade || 'ACCEPTABLE'}).`
+        },
+        formingSetup: {
+          detected: isFormingSetup,
+          type: formingSetupType,
+          description: formingSetupDesc,
+          ruleNote: 'Forming setup does not equal a signal. No signal before the required candle closes.',
+          status: 'UNCONFIRMED - Candle Still Forming'
+        },
+        confirmedSetup: {
+          isConfirmed: Boolean(confirmedSignal),
+          setupType: confirmedSignal ? confirmedSignal.setupType : (htfStatusReason ? 'Rejected by Higher Timeframe Filter' : 'None - No Valid Setup Found'),
+          direction: confirmedSignal ? confirmedSignal.direction : null,
+          confirmedAtCloseTime: confirmedCandleCloseTime
+        },
+        strongestStrategy: {
+          name: confirmedSignal ? confirmedSignal.setupType : (htfStatusReason ? 'Rejected by HTF' : 'None qualifying'),
+          confidence: confirmedSignal ? confirmedSignal.confidence : 0,
+          status: confirmedSignal ? 'QUALIFIED & CONFIRMED' : (htfStatusReason ? 'REJECTED BY HTF CONFIRMATION' : 'NO STRATEGY QUALIFIED')
+        },
+        action: confirmedSignal ? (confirmedSignal.direction === 'UP' ? 'BUY' : 'SELL') : 'NO SETUP',
+        actionLabel: confirmedSignal ? (confirmedSignal.direction === 'UP' ? 'BUY (CONFIRMED)' : 'SELL (CONFIRMED)') : (htfStatusReason ? 'REJECTED BY HTF' : 'NO VALID SETUP FOUND'),
+        exactReason,
+        rejectionOrAcceptanceStatus: confirmedSignal ? 'ACCEPTED' : (htfStatusReason ? 'REJECTED (HIGHER TIMEFRAME)' : 'REJECTED (NO STRATEGY QUALIFIED)'),
+        tradeLevels: confirmedSignal ? {
+          entryPrice: confirmedSignal.entryPrice,
+          stopLoss: confirmedSignal.stopLoss,
+          takeProfit1: confirmedSignal.takeProfit1,
+          takeProfit2: confirmedSignal.takeProfit2,
+          rewardRiskRatio: confirmedSignal.rewardRiskRatio
+        } : null,
+        htfConfirmation: htfEvaluation || (confirmedSignal ? confirmedSignal.htfConfirmation : null)
+      };
 
       return {
         asset: symbol,
@@ -740,13 +1249,16 @@ class ScannerService {
         currentPrice,
         confirmedCandleCloseTime,
         regimeData: analysis.regimeData,
-        signal: analysis.aiFilteredSignal || analysis.originalSignal,
+        qualityResult: analysis.qualityResult,
+        signal: confirmedSignal,
         originalSignal: analysis.originalSignal,
         inverseSignal: analysis.inverseSignal,
         aiFilteredSignal: analysis.aiFilteredSignal,
         aiFilteredInverseSignal: analysis.aiFilteredInverseSignal,
         pendingRetest: analysis.pendingRetest,
-        scannedAt: Date.now()
+        htfConfirmation: htfEvaluation,
+        scannedAt: Date.now(),
+        evaluation
       };
     } catch (err) {
       console.warn(`[scannerService] Error scanning single asset ${symbol}:`, err.message);
@@ -764,7 +1276,7 @@ class ScannerService {
    * Evaluates candles, detects market regime, applies NWWT setup rules,
    * runs AI structure validation, and generates 4 research model representations.
    */
-  analyzeCandles(symbol, timeframe, rawCandles, currentPrice) {
+  analyzeCandles(symbol, timeframe, rawCandles, currentPrice, fiveMinCandles = null, htfConfirmation = null) {
     const now = Date.now();
     // STRICT REQUIREMENT: Only evaluate completed candles whose close event has confirmed.
     // Discard any forming candle whose closeTime > now or openTime + duration > now,
@@ -861,8 +1373,10 @@ class ScannerService {
         timestamp: c0.closeTime,
         confirmedCandleCloseTime: c0.closeTime,
         closedCandles,
+        fiveMinCandles,
         regimeData,
-        marketStructureQuality: qualityResult
+        marketStructureQuality: qualityResult,
+        htfConfirmation
       });
     } else if (c1.close < lastLow && c0.high >= lastLow && c0.close < lastLow && !c0IsGreen) {
       baseSignal = this.generateStructuralSignal({
@@ -876,8 +1390,10 @@ class ScannerService {
         timestamp: c0.closeTime,
         confirmedCandleCloseTime: c0.closeTime,
         closedCandles,
+        fiveMinCandles,
         regimeData,
-        marketStructureQuality: qualityResult
+        marketStructureQuality: qualityResult,
+        htfConfirmation
       });
     }
 
@@ -909,8 +1425,10 @@ class ScannerService {
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
           closedCandles,
+          fiveMinCandles,
           regimeData,
-          marketStructureQuality: qualityResult
+          marketStructureQuality: qualityResult,
+          htfConfirmation
         });
       } else if (isStrongBearishBreak) {
         baseSignal = this.generateStructuralSignal({
@@ -924,8 +1442,10 @@ class ScannerService {
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
           closedCandles,
+          fiveMinCandles,
           regimeData,
-          marketStructureQuality: qualityResult
+          marketStructureQuality: qualityResult,
+          htfConfirmation
         });
       }
     }
@@ -946,8 +1466,10 @@ class ScannerService {
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
           closedCandles,
+          fiveMinCandles,
           regimeData,
-          marketStructureQuality: qualityResult
+          marketStructureQuality: qualityResult,
+          htfConfirmation
         });
       } else if (c0.low < lastLow && c0.close > lastLow && (c0LowerWick / c0Range) > 0.45 && c0IsGreen) {
         baseSignal = this.generateStructuralSignal({
@@ -961,8 +1483,10 @@ class ScannerService {
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
           closedCandles,
+          fiveMinCandles,
           regimeData,
-          marketStructureQuality: qualityResult
+          marketStructureQuality: qualityResult,
+          htfConfirmation
         });
       }
     }
@@ -986,8 +1510,10 @@ class ScannerService {
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
           closedCandles,
+          fiveMinCandles,
           regimeData,
-          marketStructureQuality: qualityResult
+          marketStructureQuality: qualityResult,
+          htfConfirmation
         });
       } else if (isBearishEngulfing && Math.abs(c0.high - lastHigh) / lastHigh < 0.018) {
         baseSignal = this.generateStructuralSignal({
@@ -1001,8 +1527,10 @@ class ScannerService {
           timestamp: c0.closeTime,
           confirmedCandleCloseTime: c0.closeTime,
           closedCandles,
+          fiveMinCandles,
           regimeData,
-          marketStructureQuality: qualityResult
+          marketStructureQuality: qualityResult,
+          htfConfirmation
         });
       }
     }
@@ -1299,13 +1827,33 @@ class ScannerService {
       totalSymbols: marketCache.tickers.size,
       lastScanTime: this.lastScanTime,
       signals: activeSignals, // ONLY genuinely active signals in active scanner!
-      completedSignals: completedSignals.slice(0, 150),
+      completedSignals: completedSignals.slice(0, 500),
       activeCount: activeSignals.length,
       completedCount: completedSignals.length,
       pendingRetests: this.pendingRetests.filter((p) => !isPermanentlyExcludedSymbol(p.asset)),
       performance: this.computePerformanceStats(),
-      qualityDiagnostics: this.getQualityDiagnostics()
+      qualityDiagnostics: this.getQualityDiagnostics(),
+      // Multi-Timeframe and Fair Coverage Metrics
+      htfConfirmationEnabled: Boolean(this.htfConfirmationEnabled),
+      htfTimeframe: this.htfTimeframe || getLogicalHigherTimeframe(this.timeframe),
+      htfRuleMode: this.htfRuleMode || 'lenient',
+      coverageMetrics: this.coverageStats
     };
+  }
+
+  setScannerConfig({ timeframe, htfConfirmationEnabled, htfTimeframe, htfRuleMode }) {
+    if (timeframe && typeof timeframe === 'string') {
+      this.timeframe = timeframe;
+    }
+    if (htfConfirmationEnabled !== undefined) {
+      this.htfConfirmationEnabled = Boolean(htfConfirmationEnabled);
+    }
+    if (htfTimeframe && typeof htfTimeframe === 'string') {
+      this.htfTimeframe = htfTimeframe;
+    }
+    if (htfRuleMode && ['lenient', 'aligned', 'strict'].includes(htfRuleMode)) {
+      this.htfRuleMode = htfRuleMode;
+    }
   }
 
   getQualityDiagnostics() {

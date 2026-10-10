@@ -12,7 +12,7 @@ import { symbolManager } from './symbolManager.js';
 import { binanceSocket } from './binanceSocket.js';
 import { marketCache } from './marketCache.js';
 import { clientSocket } from './clientSocket.js';
-import { fetchKlines, isPermanentlyExcludedSymbol } from './binanceRest.js';
+import { fetchKlines, isPermanentlyExcludedSymbol, normalizeSymbol } from './binanceRest.js';
 import { scannerService } from './scannerService.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -66,7 +66,7 @@ app.get('/api/tickers', (req, res) => {
 });
 
 app.get('/api/ticker/:symbol', (req, res) => {
-  const symbol = req.params.symbol.toUpperCase();
+  const symbol = normalizeSymbol(req.params.symbol);
   if (isPermanentlyExcludedSymbol(symbol)) {
     return res.status(404).json({ error: `Symbol ${symbol} is permanently excluded` });
   }
@@ -78,7 +78,7 @@ app.get('/api/ticker/:symbol', (req, res) => {
 });
 
 app.get('/api/klines', async (req, res) => {
-  const symbol = (req.query.symbol || 'BTCUSDT').toString().toUpperCase();
+  const symbol = normalizeSymbol(req.query.symbol || 'BTCUSDT');
   const interval = (req.query.interval || '15m').toString();
   const limit = parseInt(req.query.limit || '200', 10);
 
@@ -130,12 +130,37 @@ app.get('/api/scanner/diagnostics', (req, res) => {
   });
 });
 
+app.post('/api/scanner/config', (req, res) => {
+  try {
+    const { timeframe, htfConfirmationEnabled, htfTimeframe, htfRuleMode } = req.body || {};
+    scannerService.setScannerConfig({
+      timeframe,
+      htfConfirmationEnabled,
+      htfTimeframe,
+      htfRuleMode
+    });
+    res.json({
+      success: true,
+      config: {
+        timeframe: scannerService.timeframe,
+        htfConfirmationEnabled: scannerService.htfConfirmationEnabled,
+        htfTimeframe: scannerService.htfTimeframe,
+        htfRuleMode: scannerService.htfRuleMode
+      },
+      scanner: scannerService.getScanData()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/scanner/scan-asset', async (req, res) => {
   try {
-    const { symbol, timeframe } = req.body || {};
-    if (!symbol) {
+    const { symbol: rawSymbol, timeframe } = req.body || {};
+    if (!rawSymbol) {
       return res.status(400).json({ error: 'Symbol parameter is required' });
     }
+    const symbol = normalizeSymbol(rawSymbol);
     const result = await scannerService.scanSingleAsset(symbol, timeframe || '15m');
     res.json({
       success: true,
