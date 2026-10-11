@@ -279,7 +279,7 @@ export const SymbolDetailDrawer: React.FC<SymbolDetailDrawerProps> = ({
             <div className="p-4 rounded-lg bg-[#131722] border border-[#2a2e39] space-y-2">
               <div className="flex items-center gap-1.5 text-xs text-slate-400">
                 <Clock className="w-3.5 h-3.5" />
-                <span>Last Binance Ticker Tick:</span>
+                <span>Last Price Update:</span>
                 <span className="font-mono text-slate-200">
                   {ticker.lastUpdateTime
                     ? new Date(ticker.lastUpdateTime).toLocaleTimeString()
@@ -289,12 +289,6 @@ export const SymbolDetailDrawer: React.FC<SymbolDetailDrawerProps> = ({
               <div className="text-[11px] text-slate-500 font-mono">
                 {secondsAgo === 0 ? 'Updated just now' : `Updated ${secondsAgo}s ago`}
               </div>
-            </div>
-
-            {/* Binance Channel Info */}
-            <div className="p-3 rounded bg-[#1e222d]/70 border border-[#2a2e39] text-[11px] font-mono text-slate-400 flex justify-between items-center">
-              <span>Binance Stream Channel:</span>
-              <span className="text-blue-400 font-semibold">{ticker.symbol.toLowerCase()}@miniTicker</span>
             </div>
           </div>
         )}

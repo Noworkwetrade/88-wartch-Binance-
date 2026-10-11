@@ -16,14 +16,15 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useBinanceMarket } from './hooks/useBinanceMarket.ts';
 import { useSignalPerformance } from './hooks/useSignalPerformance.ts';
-import { loadClearedSignalIds } from './utils/signalTouchEngine.ts';
+import { loadClearedSignalIds, removeClearedSignalId } from './utils/signalTouchEngine.ts';
 import { isPermanentlyExcludedSymbol } from './utils/marketStructureQuality.ts';
+import { loadStoredSignals, saveStoredSignals } from './utils/performanceEngine.ts';
 import { Header, NavTab } from './components/Header.tsx';
 import { WatchlistToolbar } from './components/WatchlistToolbar.tsx';
 import { WatchlistTable } from './components/WatchlistTable.tsx';
 import { WatchlistScannerPanel } from './components/WatchlistScannerPanel.tsx';
 import { CandlestickChart } from './components/CandlestickChart.tsx';
-import { TickerData, SortField, SortConfig, FilterPreset, Timeframe } from './types.ts';
+import { TickerData, SortField, SortConfig, FilterPreset, Timeframe, ScannerSignalItem } from './types.ts';
 import { BarChart2, TrendingUp, Zap } from 'lucide-react';
 
 export default function App() {
@@ -80,6 +81,9 @@ export default function App() {
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
     return (localStorage.getItem('nwwt_selected_timeframe') as Timeframe) || '15m';
   });
+
+  // User-selected or freshly scanned signal to display on chart
+  const [selectedSignal, setSelectedSignal] = useState<ScannerSignalItem | null>(null);
 
   // Ensure excluded symbols are never selected
   useEffect(() => {
@@ -202,11 +206,27 @@ export default function App() {
   const activeSignalForAsset = useMemo(() => {
     if (!selectedSymbolName) return null;
     const clearedSet = loadClearedSignalIds();
+
+    // 1. If user explicitly clicked, navigated to, or scanned a signal for this asset, prioritize it (only if genuinely active!)
+    if (
+      selectedSignal &&
+      selectedSignal.asset === selectedSymbolName &&
+      !selectedSignal.isTradeComplete &&
+      selectedSignal.status === 'ACTIVE' &&
+      !selectedSignal.tp1Hit &&
+      !selectedSignal.tp2Hit &&
+      !clearedSet.has(selectedSignal.id)
+    ) {
+      return selectedSignal;
+    }
+
     const activeList = activeSignals.filter(
       (s) =>
         s.asset === selectedSymbolName &&
         !s.isTradeComplete &&
-        (s.status === 'ACTIVE' || (s.tp1Hit && !s.isTradeComplete)) &&
+        s.status === 'ACTIVE' &&
+        !s.tp1Hit &&
+        !s.tp2Hit &&
         !clearedSet.has(s.id) &&
         s.modelType !== 'inverse' &&
         s.modelType !== 'ai_filtered_inverse' &&
@@ -221,15 +241,28 @@ export default function App() {
     const aiFiltered = activeList.find((s) => s.modelType === 'ai_filtered');
     if (aiFiltered) return aiFiltered;
     return activeList[0] || null;
-  }, [activeSignals, completedSignals, selectedSymbolName]);
+  }, [activeSignals, completedSignals, selectedSymbolName, selectedSignal]);
 
-  // Open asset chart on asset click (used by Watchlist & Scanner)
-  const handleSelectAsset = useCallback((symbol: string) => {
+  // Open asset chart on asset click (used by Watchlist, Scanner & ScanAssetModal)
+  const handleSelectAsset = useCallback((symbol: string, tf?: string, signal?: ScannerSignalItem | null) => {
     if (isPermanentlyExcludedSymbol(symbol)) return;
     setSelectedSymbolName(symbol);
+    if (tf && tf !== selectedTimeframe) {
+      setSelectedTimeframe(tf as Timeframe);
+      updateScannerConfig({ timeframe: tf as Timeframe });
+      triggerScan(tf as Timeframe);
+    }
+    if (signal) {
+      const isSettled = signal.isTradeComplete || signal.tp1Hit || signal.tp2Hit || signal.status !== 'ACTIVE' || loadClearedSignalIds().has(signal.id);
+      if (!isSettled) {
+        setSelectedSignal(signal);
+      } else {
+        setSelectedSignal(null);
+      }
+    }
     // On mobile, automatically switch to Chart tab
     setActiveTab('chart');
-  }, []);
+  }, [selectedTimeframe, updateScannerConfig, triggerScan]);
 
   // Synchronized entry timeframe change handler across chart and scanner engine
   const handleTimeframeChange = useCallback((tf: Timeframe) => {
@@ -429,17 +462,21 @@ export default function App() {
 
           <button
             onClick={() => setActiveTab('scanner')}
-            className={`flex flex-col items-center justify-center flex-1 h-full py-1 transition cursor-pointer min-w-0 relative ${
-              activeTab === 'scanner' ? 'text-amber-400 font-bold' : 'text-slate-400 hover:text-white'
-            }`}
+            className="flex items-center justify-center flex-1 h-full py-1 transition cursor-pointer min-w-0 relative"
           >
-            <div className="relative">
-              <Zap className="w-4 h-4 mb-0.5 text-amber-400 shrink-0" />
+            <div
+              className={`flex items-center justify-center gap-1.5 px-4 py-2 rounded-full transition-all ${
+                activeTab === 'scanner'
+                  ? 'bg-gradient-to-r from-amber-400 via-amber-500 to-amber-400 text-black font-black shadow-lg shadow-amber-500/35 ring-2 ring-amber-300 scale-105'
+                  : 'bg-[#12141f] border-2 border-amber-500/50 text-amber-400 hover:border-amber-400 shadow-sm'
+              }`}
+            >
+              <Zap className={`w-4 h-4 shrink-0 ${activeTab === 'scanner' ? 'text-black fill-black' : 'text-amber-400 fill-amber-400'}`} />
+              <span className="text-xs font-mono font-black tracking-wide">Scanner</span>
               {scannerState.signals.length > 0 && (
-                <span className="absolute -top-1 -right-2.5 w-2 h-2 rounded-full bg-emerald-400" />
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 ring-1 ring-black" />
               )}
             </div>
-            <span className="text-[10px] font-mono truncate">Scanner</span>
           </button>
         </div>
       </div>

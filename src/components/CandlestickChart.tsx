@@ -51,6 +51,7 @@ import {
   CoordinateContext,
   timeToX,
   xToTime,
+  getTimeframeMs,
   priceToY as convertPriceToY,
   yToPrice as convertYToPrice,
   hitTestDrawing,
@@ -61,7 +62,8 @@ import {
 import {
   checkSignalTouch,
   loadClearedSignalIds,
-  addClearedSignalId
+  addClearedSignalId,
+  removeClearedSignalId
 } from '../utils/signalTouchEngine.ts';
 import { settleSignalOutcome } from '../utils/performanceEngine.ts';
 import { DrawingToolbar } from './drawing/DrawingToolbar.tsx';
@@ -78,7 +80,7 @@ interface CandlestickChartProps {
   timeframe: Timeframe;
   onTimeframeChange: (tf: Timeframe) => void;
   onClose?: () => void;
-  onSelectSymbol?: (symbol: string) => void;
+  onSelectSymbol?: (symbol: string, timeframe?: string, signal?: ScannerSignalItem | null) => void;
   allSymbols?: TickerData[];
   activeSignal?: ScannerSignalItem | null;
 }
@@ -254,6 +256,22 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   // Cleared Signal Lines Registry (Auto-removal of TP/SL on touch)
   const [clearedSignalIds, setClearedSignalIds] = useState<Set<string>>(loadClearedSignalIds);
 
+  // Active Signal management & synchronization
+  const [localSignal, setLocalSignal] = useState<ScannerSignalItem | null>(activeSignal || null);
+  const [scannedSignal, setScannedSignal] = useState<ScannerSignalItem | null>(null);
+
+  useEffect(() => {
+    if (activeSignal && activeSignal.asset === symbol) {
+      setLocalSignal(activeSignal);
+    }
+  }, [activeSignal, symbol]);
+
+  const activeSig = (localSignal && localSignal.asset === symbol && !localSignal.isTradeComplete && localSignal.status === 'ACTIVE' && !localSignal.tp1Hit && !clearedSignalIds.has(localSignal.id))
+    ? localSignal
+    : (activeSignal && activeSignal.asset === symbol && !activeSignal.isTradeComplete && activeSignal.status === 'ACTIVE' && !activeSignal.tp1Hit && !clearedSignalIds.has(activeSignal.id))
+    ? activeSignal
+    : null;
+
   // Visual feedback notification for TP and SL trigger events
   const [levelTriggerAlert, setLevelTriggerAlert] = useState<{
     signalId: string;
@@ -294,40 +312,40 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
   // Real-time touch monitoring across live price ticks and candle wicks
   useEffect(() => {
-    if (!activeSignal || !activeSignal.entryPrice || activeSignal.entryPrice <= 0) return;
-    if (activeSignal.asset && activeSignal.asset !== symbol) return;
-    if (clearedSignalIds.has(activeSignal.id)) return;
+    if (!activeSig || !activeSig.entryPrice || activeSig.entryPrice <= 0) return;
+    if (activeSig.asset && activeSig.asset !== symbol) return;
+    if (clearedSignalIds.has(activeSig.id)) return;
     // Suppress monitoring if trade is already complete or settled
-    if (activeSignal.isTradeComplete || activeSignal.status === 'LOSS' || activeSignal.status === 'EXPIRED') return;
-    if (activeSignal.status === 'WIN' && (activeSignal.isTradeComplete || activeSignal.tp2Hit)) return;
+    if (activeSig.isTradeComplete || activeSig.status === 'LOSS' || activeSig.status === 'EXPIRED') return;
+    if (activeSig.status === 'WIN' && (activeSig.isTradeComplete || activeSig.tp2Hit)) return;
 
     const currentPrice = ticker && ticker.lastPrice !== '--'
       ? parseFloat(ticker.lastPrice)
       : (candles.length > 0 ? candles[candles.length - 1].close : null);
 
-    const touch = checkSignalTouch(activeSignal, currentPrice, candles);
+    const touch = checkSignalTouch(activeSig, currentPrice, candles);
 
     if (touch.isTouched && touch.touchedLevel) {
-      const isUp = activeSignal.direction === 'UP';
+      const isUp = activeSig.direction === 'UP';
       const exitPrice = touch.touchPrice;
       const pnlRaw = isUp
-        ? ((exitPrice - activeSignal.entryPrice) / activeSignal.entryPrice) * 100
-        : ((activeSignal.entryPrice - exitPrice) / activeSignal.entryPrice) * 100;
+        ? ((exitPrice - activeSig.entryPrice) / activeSig.entryPrice) * 100
+        : ((activeSig.entryPrice - exitPrice) / activeSig.entryPrice) * 100;
 
       // Real-time guard: only trigger visual popups and sounds if event occurs in real time
       const isRealTime = (touch.touchTimestamp || Date.now()) >= chartMountedAtRef.current;
 
       // 1. Handle TP #2 reached (trade fully completed)
       if (touch.touchedLevel === 'TP2') {
-        addClearedSignalId(activeSignal.id);
-        setClearedSignalIds((prev) => new Set(prev).add(activeSignal.id));
-        settleSignalOutcome(activeSignal.id, 'WIN', exitPrice, 'tp #2 hit | trade complete');
+        addClearedSignalId(activeSig.id);
+        setClearedSignalIds((prev) => new Set(prev).add(activeSig.id));
+        settleSignalOutcome(activeSig.id, 'WIN', exitPrice, 'tp #2 hit | trade complete');
 
-        const alertKey = `${activeSignal.id}-tp2`;
+        const alertKey = `${activeSig.id}-tp2`;
         if (isRealTime && !alertedSignalEventsRef.current.has(alertKey)) {
           alertedSignalEventsRef.current.add(alertKey);
           setLevelTriggerAlert({
-            signalId: activeSignal.id,
+            signalId: activeSig.id,
             type: 'TP2',
             price: exitPrice,
             pnl: Math.abs(pnlRaw),
@@ -339,23 +357,21 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         return;
       }
 
-      // 2. Handle TP #1 reached (immediately marked WIN, continues watching TP2)
+      // 2. Handle TP reached (immediately marked WIN, completed, and cleared)
       if (touch.touchedLevel === 'TP1' || touch.touchedLevel === 'TP') {
-        const rr = activeSignal.rewardRiskRatio || (Math.abs(exitPrice - activeSignal.entryPrice) / (Math.abs(activeSignal.entryPrice - activeSignal.stopLoss) || 1));
+        const rr = activeSig.rewardRiskRatio || (Math.abs(exitPrice - activeSig.entryPrice) / (Math.abs(activeSig.entryPrice - activeSig.stopLoss) || 1));
         const rrStr = rr.toFixed(2);
-        const msg = `tp #1 hit | r:r ${rrStr} | win`;
+        const msg = `tp hit | r:r ${rrStr} | win`;
 
-        if (touch.isTradeComplete) {
-          addClearedSignalId(activeSignal.id);
-          setClearedSignalIds((prev) => new Set(prev).add(activeSignal.id));
-        }
-        settleSignalOutcome(activeSignal.id, 'WIN', exitPrice, msg);
+        addClearedSignalId(activeSig.id);
+        setClearedSignalIds((prev) => new Set(prev).add(activeSig.id));
+        settleSignalOutcome(activeSig.id, 'WIN', exitPrice, msg);
 
-        const alertKey = `${activeSignal.id}-tp1`;
+        const alertKey = `${activeSig.id}-tp1`;
         if (isRealTime && !alertedSignalEventsRef.current.has(alertKey)) {
           alertedSignalEventsRef.current.add(alertKey);
           setLevelTriggerAlert({
-            signalId: activeSignal.id,
+            signalId: activeSig.id,
             type: 'TP1',
             price: exitPrice,
             pnl: Math.abs(pnlRaw),
@@ -369,24 +385,24 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
       // 3. Handle SL reached (or dual touch)
       if (touch.touchedLevel === 'SL' || touch.touchedLevel === 'BOTH') {
-        addClearedSignalId(activeSignal.id);
-        setClearedSignalIds((prev) => new Set(prev).add(activeSignal.id));
+        addClearedSignalId(activeSig.id);
+        setClearedSignalIds((prev) => new Set(prev).add(activeSig.id));
 
         // If TP #1 was already secured, trade REMAINS A WIN!
-        const finalOutcome = activeSignal.tp1Hit ? 'WIN' : 'LOSS';
-        const rr = activeSignal.rewardRiskRatio || (Math.abs((activeSignal.tp1Price || activeSignal.takeProfit) - activeSignal.entryPrice) / (Math.abs(activeSignal.entryPrice - activeSignal.stopLoss) || 1));
+        const finalOutcome = activeSig.tp1Hit ? 'WIN' : 'LOSS';
+        const rr = activeSig.rewardRiskRatio || (Math.abs((activeSig.tp1Price || activeSig.takeProfit) - activeSig.entryPrice) / (Math.abs(activeSig.entryPrice - activeSig.stopLoss) || 1));
         const rrStr = rr.toFixed(2);
-        const reason = activeSignal.tp1Hit
+        const reason = activeSig.tp1Hit
           ? `tp #1 hit | r:r ${rrStr} | win (reversal to SL)`
           : touch.reason;
 
-        settleSignalOutcome(activeSignal.id, finalOutcome, exitPrice, reason);
+        settleSignalOutcome(activeSig.id, finalOutcome, exitPrice, reason);
 
-        const alertKey = `${activeSignal.id}-sl`;
+        const alertKey = `${activeSig.id}-sl`;
         if (isRealTime && !alertedSignalEventsRef.current.has(alertKey)) {
           alertedSignalEventsRef.current.add(alertKey);
           setLevelTriggerAlert({
-            signalId: activeSignal.id,
+            signalId: activeSig.id,
             type: finalOutcome === 'WIN' ? 'TP1' : 'SL',
             price: exitPrice,
             pnl: finalOutcome === 'WIN' ? Math.abs(pnlRaw) : -Math.abs(pnlRaw),
@@ -397,7 +413,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         }
       }
     }
-  }, [activeSignal, ticker, candles, clearedSignalIds, symbol]);
+  }, [activeSig, ticker, candles, clearedSignalIds, symbol]);
 
   const selectedDrawing = useMemo(() => {
     return drawings.find((d) => d.id === selectedDrawingId) || null;
@@ -495,7 +511,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
   const handleScanChartAsset = useCallback(async () => {
     setIsScanningAsset(true);
-    setScanFeedback(`Scanning ${symbol} (${timeframe}) with live market candles...`);
+    setScanFeedback(`Scanning ${symbol} (${timeframe})...`);
     try {
       const res = await fetch('/api/scanner/scan-asset', {
         method: 'POST',
@@ -504,22 +520,23 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       });
       const data = await res.json();
       if (data && data.result) {
-        if (data.result.evaluation) {
-          setScanEvaluation(data.result.evaluation);
-          setIsScanModalOpen(true);
-        }
         if (data.result.signal) {
-          setScanFeedback(`Setup Identified on ${symbol}: ${data.result.signal.direction} (${data.result.signal.setupType})`);
-        } else if (data.result.pendingRetest) {
-          setScanFeedback(`Retest Detected on ${symbol}: Pulling back to $${formatPrice(data.result.pendingRetest.targetLevel)}`);
+          setScannedSignal(data.result.signal);
         } else {
-          setScanFeedback(`Scan Complete on ${symbol} (${timeframe}): No confirmed setup. Waiting for break or retest.`);
+          setScannedSignal(null);
+        }
+        setScanEvaluation(data.result);
+        setIsScanModalOpen(true);
+        if (data.result.hasSetup && data.result.signal) {
+          setScanFeedback(`Setup identified on ${symbol}: ${data.result.signal.direction === 'UP' ? 'BUY' : 'SELL'}`);
+        } else {
+          setScanFeedback(`no valid setup found`);
         }
       } else {
-        setScanFeedback(`Scan complete for ${symbol}.`);
+        setScanFeedback(`no valid setup found`);
       }
     } catch (err: any) {
-      setScanFeedback(`Scan error for ${symbol}: ${err.message || 'Check connection'}`);
+      setScanFeedback(`no valid setup found`);
     } finally {
       setIsScanningAsset(false);
       setTimeout(() => {
@@ -567,7 +584,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     setFetchError(null);
     fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&limit=250`)
       .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load Binance candles (${res.status})`);
+        if (!res.ok) throw new Error(`Failed to load market candles (${res.status})`);
         return res.json();
       })
       .then((data) => {
@@ -606,7 +623,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           { signal: controller.signal }
         );
         if (!res.ok) {
-          throw new Error(`Failed to load Binance candles (${res.status})`);
+          throw new Error(`Failed to load market candles (${res.status})`);
         }
         const data = await res.json();
         if (isCancelled) return;
@@ -1292,20 +1309,33 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     }
 
     // When an active signal is present and not cleared, ensure auto-fit scale
-    // includes its Entry, Take Profit, and Stop Loss levels with comfortable margin
-    const isSignalActiveForScale = activeSignal && activeSignal.status === 'ACTIVE' && activeSignal.entryPrice && !clearedSignalIds.has(activeSignal.id) && activeSignal.asset === symbol;
-    if (isSignalActiveForScale) {
-      if (activeSignal.takeProfit) {
-        minPrice = Math.min(minPrice, activeSignal.takeProfit);
-        maxPrice = Math.max(maxPrice, activeSignal.takeProfit);
+    // includes its Entry, Take Profit (#1 and #2), and Stop Loss levels with comfortable margin
+    const isSignalActiveForScale = activeSig &&
+      !activeSig.isTradeComplete &&
+      activeSig.status !== 'LOSS' &&
+      activeSig.status !== 'EXPIRED' &&
+      activeSig.entryPrice &&
+      !clearedSignalIds.has(activeSig.id) &&
+      activeSig.asset === symbol;
+
+    if (isSignalActiveForScale && activeSig) {
+      const tp1 = activeSig.takeProfit1 || activeSig.takeProfit;
+      const tp2 = activeSig.takeProfit2;
+      if (tp1) {
+        minPrice = Math.min(minPrice, tp1);
+        maxPrice = Math.max(maxPrice, tp1);
       }
-      if (activeSignal.stopLoss) {
-        minPrice = Math.min(minPrice, activeSignal.stopLoss);
-        maxPrice = Math.max(maxPrice, activeSignal.stopLoss);
+      if (tp2) {
+        minPrice = Math.min(minPrice, tp2);
+        maxPrice = Math.max(maxPrice, tp2);
       }
-      if (activeSignal.entryPrice) {
-        minPrice = Math.min(minPrice, activeSignal.entryPrice);
-        maxPrice = Math.max(maxPrice, activeSignal.entryPrice);
+      if (activeSig.stopLoss) {
+        minPrice = Math.min(minPrice, activeSig.stopLoss);
+        maxPrice = Math.max(maxPrice, activeSig.stopLoss);
+      }
+      if (activeSig.entryPrice) {
+        minPrice = Math.min(minPrice, activeSig.entryPrice);
+        maxPrice = Math.max(maxPrice, activeSig.entryPrice);
       }
     }
 
@@ -1560,64 +1590,111 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
     // 3.5 Draw Active Signal Entry, Take Profit (#1 and #2), and Stop Loss Levels (TradingView Style)
     // AUTO-REMOVAL: When trade is finished (TP2, SL, or reversal), lines are immediately cleared
-    const isSignalCleared = activeSignal ? clearedSignalIds.has(activeSignal.id) : true;
+    const isSignalCleared = activeSig ? clearedSignalIds.has(activeSig.id) : true;
 
     if (
-      activeSignal &&
-      !activeSignal.isTradeComplete &&
-      activeSignal.status !== 'LOSS' &&
-      activeSignal.status !== 'EXPIRED' &&
-      activeSignal.entryPrice &&
+      activeSig &&
+      !activeSig.isTradeComplete &&
+      activeSig.status !== 'LOSS' &&
+      activeSig.status !== 'EXPIRED' &&
+      activeSig.entryPrice &&
       !isSignalCleared &&
-      activeSignal.asset === symbol
+      activeSig.asset === symbol
     ) {
       // Professional TradingView Position Visualization
-      const anchorTime = activeSignal.timestamp || (candles.length > 0 ? candles[0].openTime : Date.now());
-      const anchorX = timeToX(anchorTime, coordCtx);
-      const startX = Math.max(0, Math.min(chartWidth - 10, Math.round(anchorX)));
-      const endX = chartWidth;
+      // Anchor to the exact candle where the signal was generated
+      const tfMs = getTimeframeMs(timeframe);
+      const targetTime = activeSig.confirmedCandleCloseTime || activeSig.timestamp;
+      let signalCandleIndex = -1;
 
-      if (startX < endX) {
-        const isUp = activeSignal.direction === 'UP';
-        const risk = Math.abs(activeSignal.entryPrice - activeSignal.stopLoss);
-        const tp1Price = activeSignal.takeProfit1 || activeSignal.takeProfit;
-        const tp2Price = activeSignal.takeProfit2;
+      if (candles && candles.length > 0 && targetTime) {
+        // Direct match with candle closeTime, openTime, or within [openTime, closeTime]
+        signalCandleIndex = candles.findIndex((c) => {
+          const cClose = c.closeTime || (c.openTime + tfMs);
+          return (
+            c.closeTime === targetTime ||
+            c.openTime === targetTime ||
+            (c.openTime <= targetTime && targetTime <= cClose) ||
+            Math.abs(cClose - targetTime) < 5000 ||
+            Math.abs(c.openTime - targetTime) < 5000
+          );
+        });
+
+        // Match closest candle if within 2 timeframe intervals
+        if (signalCandleIndex === -1) {
+          let minDiff = Infinity;
+          for (let i = 0; i < candles.length; i++) {
+            const c = candles[i];
+            const diff = Math.min(
+              Math.abs(c.openTime - targetTime),
+              Math.abs((c.closeTime || c.openTime + tfMs) - targetTime)
+            );
+            if (diff < minDiff) {
+              minDiff = diff;
+              signalCandleIndex = i;
+            }
+          }
+          if (minDiff > tfMs * 2) {
+            signalCandleIndex = -1;
+          }
+        }
+      }
+
+      // Exact anchor coordinate of the signal candle
+      const anchorX = signalCandleIndex >= 0
+        ? chartWidth - (rawEndIndex - signalCandleIndex + 0.5) * candleWidth
+        : timeToX(targetTime || (candles.length > 0 ? candles[0].openTime : Date.now()), coordCtx);
+
+      const startX = Math.round(anchorX);
+      const boxWidth = Math.round(20 * candleWidth);
+      const endX = startX + boxWidth;
+
+      if (startX < chartWidth && endX > 0) {
+        const isUp = activeSig.direction === 'UP';
+        const risk = Math.abs(activeSig.entryPrice - activeSig.stopLoss);
+        const tp1Price = activeSig.takeProfit1 || activeSig.takeProfit;
+        const tp2Price = activeSig.takeProfit2;
         const maxTargetPrice = tp2Price || tp1Price;
 
-        const yEntry = Math.round(priceToY(activeSignal.entryPrice)) - 0.5;
+        const yEntry = Math.round(priceToY(activeSig.entryPrice)) - 0.5;
         const yTP1 = Math.round(priceToY(tp1Price)) - 0.5;
         const yTP2 = tp2Price ? Math.round(priceToY(tp2Price)) - 0.5 : null;
-        const ySL = Math.round(priceToY(activeSignal.stopLoss)) - 0.5;
+        const ySL = Math.round(priceToY(activeSig.stopLoss)) - 0.5;
 
         const tp1PnlPercent = isUp
-          ? ((tp1Price - activeSignal.entryPrice) / activeSignal.entryPrice) * 100
-          : ((activeSignal.entryPrice - tp1Price) / activeSignal.entryPrice) * 100;
+          ? ((tp1Price - activeSig.entryPrice) / activeSig.entryPrice) * 100
+          : ((activeSig.entryPrice - tp1Price) / activeSig.entryPrice) * 100;
         const tp2PnlPercent = tp2Price
           ? (isUp
-              ? ((tp2Price - activeSignal.entryPrice) / activeSignal.entryPrice) * 100
-              : ((activeSignal.entryPrice - tp2Price) / activeSignal.entryPrice) * 100)
+              ? ((tp2Price - activeSig.entryPrice) / activeSig.entryPrice) * 100
+              : ((activeSig.entryPrice - tp2Price) / activeSig.entryPrice) * 100)
           : null;
         const slPnlPercent = isUp
-          ? ((activeSignal.entryPrice - activeSignal.stopLoss) / activeSignal.entryPrice) * 100
-          : ((activeSignal.stopLoss - activeSignal.entryPrice) / activeSignal.entryPrice) * 100;
-        const riskRewardRatio = activeSignal.rewardRiskRatio || (risk > 0 ? Math.abs(tp1Price - activeSignal.entryPrice) / risk : 1.50);
+          ? ((activeSig.entryPrice - activeSig.stopLoss) / activeSig.entryPrice) * 100
+          : ((activeSig.stopLoss - activeSig.entryPrice) / activeSig.entryPrice) * 100;
+        const riskRewardRatio = activeSig.rewardRiskRatio || (risk > 0 ? Math.abs(tp1Price - activeSig.entryPrice) / risk : 1.50);
 
         // 1. Shaded Position Zones (TradingView Style)
         ctx.save();
+        // Clip to chart drawing area so shaded zones do not bleed into the right price axis margin or negative X
+        ctx.beginPath();
+        ctx.rect(0, 0, chartWidth, chartHeight);
+        ctx.clip();
+
         // Target Profit Zone (Emerald) up to highest target
         const yTargetBoundary = yTP2 !== null ? yTP2 : yTP1;
         const tpTop = Math.min(yEntry, yTargetBoundary);
         const tpHeight = Math.abs(yEntry - yTargetBoundary);
         if (tpHeight > 0) {
           ctx.fillStyle = 'rgba(16, 185, 129, 0.08)';
-          ctx.fillRect(startX, tpTop, endX - startX, tpHeight);
+          ctx.fillRect(startX, tpTop, boxWidth, tpHeight);
         }
         // Stop Loss Risk Zone (Rose)
         const slTop = Math.min(yEntry, ySL);
         const slHeight = Math.abs(yEntry - ySL);
         if (slHeight > 0) {
           ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
-          ctx.fillRect(startX, slTop, endX - startX, slHeight);
+          ctx.fillRect(startX, slTop, boxWidth, slHeight);
         }
         ctx.restore();
 
@@ -1641,7 +1718,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           ctx.stroke();
 
           // Risk-to-Reward Ratio Tag anchored on the connector
-          if (startX + 75 < chartWidth) {
+          if (startX + 75 < chartWidth && startX + 75 <= endX) {
             const tagY = (yTP1 + yEntry) / 2;
             ctx.fillStyle = 'rgba(14, 16, 23, 0.88)';
             ctx.strokeStyle = isUp ? 'rgba(16, 185, 129, 0.5)' : 'rgba(239, 68, 68, 0.5)';
@@ -1672,19 +1749,25 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         ) => {
           if (y < -20 || y > chartHeight + 20) return;
 
-          ctx.save();
-          ctx.setLineDash(dashPattern);
-          ctx.strokeStyle = strokeColor;
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          ctx.moveTo(startX, y);
-          ctx.lineTo(endX, y);
-          ctx.stroke();
-          ctx.restore();
+          // Limit horizontal price lines to the 20-candle position box width (clipped at chart boundary)
+          const lineStartX = Math.max(0, startX);
+          const lineEndX = Math.min(endX, chartWidth);
+
+          if (lineEndX > lineStartX) {
+            ctx.save();
+            ctx.setLineDash(dashPattern);
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(startX, y);
+            ctx.lineTo(lineEndX, y);
+            ctx.stroke();
+            ctx.restore();
+          }
 
           // Left on-canvas floating label tag
           const labelX = Math.max(startX + 8, 10);
-          if (labelX + 90 < endX) {
+          if (labelX + 85 < lineEndX) {
             ctx.save();
             ctx.fillStyle = 'rgba(14, 16, 23, 0.9)';
             ctx.strokeStyle = strokeColor;
@@ -1726,7 +1809,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
         // Draw Entry, TP #1, TP #2 (if valid structural target exists), and SL
         // STRICT RULE: Once candle body or wick touches a level, immediately remove the touched level from the chart
-        if (yTP2 !== null && tp2Price !== undefined && !activeSignal.tp2Hit) {
+        if (yTP2 !== null && tp2Price !== undefined && !activeSig.tp2Hit) {
           drawSignalLine(
             yTP2,
             tp2Price,
@@ -1737,7 +1820,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             [6, 4]
           );
         }
-        if (!activeSignal.tp1Hit) {
+        if (!activeSig.tp1Hit) {
           drawSignalLine(
             yTP1,
             tp1Price,
@@ -1750,7 +1833,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         }
         drawSignalLine(
           yEntry,
-          activeSignal.entryPrice,
+          activeSig.entryPrice,
           'ENTRY',
           '',
           '#f59e0b',
@@ -1759,7 +1842,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         );
         drawSignalLine(
           ySL,
-          activeSignal.stopLoss,
+          activeSig.stopLoss,
           'SL',
           `-${Math.abs(slPnlPercent).toFixed(2)}%`,
           '#ef4444',
@@ -2013,68 +2096,54 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
 
         {/* Active Signal HUD Banner */}
-        {activeSignal &&
-        activeSignal.entryPrice &&
-        activeSignal.status === 'ACTIVE' &&
-        !activeSignal.isTradeComplete &&
-        !clearedSignalIds.has(activeSignal.id) &&
-        activeSignal.asset === symbol ? (
+        {activeSig &&
+        activeSig.entryPrice &&
+        activeSig.status === 'ACTIVE' &&
+        !activeSig.isTradeComplete &&
+        !clearedSignalIds.has(activeSig.id) &&
+        activeSig.asset === symbol ? (
           <div className="px-3.5 py-1 bg-[#0d0f18] border-b border-[#1c1f2e] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shrink-0">
             <div className="flex items-center gap-3">
               <span className="flex items-center gap-1 font-bold text-amber-400">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                Setup: {activeSignal.direction} ({activeSignal.setupType})
+                Setup: {activeSig.direction} ({activeSig.setupType})
               </span>
               <span className="text-slate-400">
-                Entry: <strong className="text-white">${formatPrice(activeSignal.entryPrice)}</strong>
+                Entry: <strong className="text-white">${formatPrice(activeSig.entryPrice)}</strong>
               </span>
               <span className="text-slate-400">
-                TP: <strong className="text-emerald-400">${formatPrice(activeSignal.takeProfit)}</strong>
+                TP #1: <strong className="text-emerald-400">${formatPrice(activeSig.takeProfit1 || activeSig.takeProfit)}</strong>
               </span>
+              {activeSig.takeProfit2 ? (
+                <span className="text-slate-400">
+                  TP #2: <strong className="text-emerald-400">${formatPrice(activeSig.takeProfit2)}</strong>
+                </span>
+              ) : null}
               <span className="text-slate-400">
-                SL: <strong className="text-red-400">${formatPrice(activeSignal.stopLoss)}</strong>
+                SL: <strong className="text-red-400">${formatPrice(activeSig.stopLoss)}</strong>
               </span>
               <span className="text-slate-400 hidden sm:inline">
-                R:R: <strong className="text-indigo-300">1:{(Math.abs(activeSignal.takeProfit - activeSignal.entryPrice) / (Math.abs(activeSignal.entryPrice - activeSignal.stopLoss) || 1)).toFixed(2)}</strong>
+                R:R: <strong className="text-indigo-300">1:{(activeSig.rewardRiskRatio || (Math.abs((activeSig.takeProfit1 || activeSig.takeProfit) - activeSig.entryPrice) / (Math.abs(activeSig.entryPrice - activeSig.stopLoss) || 1))).toFixed(2)}</strong>
               </span>
             </div>
             <div className="flex items-center gap-2">
-              {activeSignal.aiValidation && (
-                <span
-                  className={`px-1.5 py-0.2 rounded text-[10px] font-bold border ${
-                    activeSignal.aiValidation.status === 'allow'
-                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                      : activeSignal.aiValidation.status === 'reject'
-                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
-                      : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
-                  }`}
-                >
-                  AI: {activeSignal.aiValidation.status.toUpperCase()}
-                </span>
-              )}
-              {activeSignal.marketRegime && (
-                <span className="px-1.5 py-0.2 rounded text-[10px] bg-[#1a1d28] text-slate-300 border border-[#282c3d] capitalize hidden sm:inline">
-                  {activeSignal.marketRegime.replace(/_/g, ' ')}
-                </span>
-              )}
               <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                WATCHING LIVE
+                ACTIVE
               </span>
-              <span className="text-[10px] text-slate-500">{activeSignal.confidence}% Conf.</span>
             </div>
           </div>
-        ) : activeSignal &&
-          (clearedSignalIds.has(activeSignal.id) || activeSignal.isTradeComplete || activeSignal.status === 'LOSS' || activeSignal.status === 'WIN' || activeSignal.status === 'EXPIRED') &&
-          activeSignal.asset === symbol ? (
+        ) : activeSig &&
+          (clearedSignalIds.has(activeSig.id) || activeSig.isTradeComplete || activeSig.status === 'LOSS' || activeSig.status === 'WIN' || activeSig.status === 'EXPIRED') &&
+          activeSig.asset === symbol ? (
           <div className="px-3.5 py-1 bg-[#091414] border-b border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shrink-0">
             <div className="flex items-center gap-2">
               <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
                 TRADE SETTLED
               </span>
-              <span className="text-slate-300 font-semibold">{activeSignal.setupType}</span>
+              <span className="text-slate-300 font-semibold">{activeSig.setupType}</span>
               <span className="text-slate-400">
-                Entry: ${formatPrice(activeSignal.entryPrice)} • TP: ${formatPrice(activeSignal.takeProfit)} • SL: ${formatPrice(activeSignal.stopLoss)}
+                Entry: ${formatPrice(activeSig.entryPrice)} • TP: ${formatPrice(activeSig.takeProfit1 || activeSig.takeProfit)} • SL: ${formatPrice(activeSig.stopLoss)}
               </span>
             </div>
             <div className="text-[10px] text-emerald-400 font-semibold">
@@ -2255,144 +2324,108 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               NW
             </div>
             <span className="font-extrabold text-xs tracking-wider text-white font-mono uppercase">
-              NWWT Structure Scanner
-            </span>
-            <span
-              className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold uppercase ${
-                marketStructure.currentTrend === 'bullish'
-                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                  : marketStructure.currentTrend === 'bearish'
-                  ? 'bg-red-500/15 text-red-400 border border-red-500/30'
-                  : 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
-              }`}
-            >
-              {marketStructure.currentTrend} Structure
+              NWWT Scanner
             </span>
 
             {/* Signal Badge */}
-            <span
-              className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold uppercase border flex items-center gap-1 ${
-                scanResult.decision.signal === 'UP'
-                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                  : scanResult.decision.signal === 'DOWN'
-                  ? 'bg-red-500/15 text-red-400 border border-red-500/30'
-                  : 'bg-slate-800 text-slate-400 border-slate-700'
-              }`}
-            >
-              {scanResult.decision.signal === 'UP' && <TrendingUp className="w-3 h-3 text-emerald-400" />}
-              {scanResult.decision.signal === 'DOWN' && <TrendingDown className="w-3 h-3 text-red-400" />}
-              <span>{scanResult.decision.signal}</span>
-            </span>
-
-            {scanResult.decision.setupQuality !== 'NONE' && (
-              <span className="px-1.5 py-0.2 rounded text-[9.5px] font-mono uppercase font-semibold bg-[#141724] text-slate-400 border border-[#23273c] hidden sm:inline">
-                {scanResult.decision.setupQuality}
+            {(scanResult.decision.signal === 'UP' || scanResult.decision.signal === 'DOWN') && (
+              <span
+                className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold uppercase border flex items-center gap-1 ${
+                  scanResult.decision.signal === 'UP'
+                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                    : 'bg-red-500/15 text-red-400 border border-red-500/30'
+                }`}
+              >
+                {scanResult.decision.signal === 'UP' && <TrendingUp className="w-3 h-3 text-emerald-400" />}
+                {scanResult.decision.signal === 'DOWN' && <TrendingDown className="w-3 h-3 text-red-400" />}
+                <span>{scanResult.decision.signal}</span>
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* Dedicated Scan Asset Button */}
+          <div className="w-full sm:w-auto flex items-center justify-end sm:justify-start pt-1 sm:pt-0">
+            {/* Prominent Scan Asset Button (Black and Gold) */}
             <button
               onClick={handleScanChartAsset}
               disabled={isScanningAsset}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 active:scale-95 text-black font-mono font-bold text-xs shadow-sm transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-              title={`Scan market structure on ${symbol} (${timeframe})`}
+              className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 rounded-lg bg-gradient-to-r from-amber-400 via-amber-500 to-amber-400 hover:from-amber-300 hover:to-amber-400 active:scale-[0.98] text-black font-mono font-black text-xs sm:text-sm shadow-lg shadow-amber-500/25 border border-amber-300/50 ring-2 ring-amber-400/40 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap select-none min-h-[42px]"
+              title={`Scan setup for ${symbol} (${timeframe})`}
             >
-              <Search className={`w-3 h-3 ${isScanningAsset ? 'animate-spin' : ''}`} />
-              <span>Scan Asset</span>
-              <span className="text-[9.5px] bg-black/20 text-black px-1 rounded font-bold">
-                {symbol.replace(/USDT$/, '')}
+              <Sparkles className={`w-4 h-4 shrink-0 ${isScanningAsset ? 'animate-spin' : ''}`} />
+              <span>{isScanningAsset ? 'Scanning Asset...' : 'Scan Asset'}</span>
+              <span className="text-[11px] bg-black/25 text-black px-2 py-0.5 rounded font-extrabold">
+                {symbol.replace(/USDT$/, '')} • {timeframe}
               </span>
             </button>
           </div>
         </div>
 
         {/* Setup Condition Display (Answers "Is there a setup?" - Requirement 6) */}
-        {activeSignal &&
-        activeSignal.entryPrice &&
-        activeSignal.status === 'ACTIVE' &&
-        !activeSignal.isTradeComplete &&
-        !clearedSignalIds.has(activeSignal.id) &&
-        activeSignal.asset === symbol ? (
+        {activeSig &&
+        activeSig.entryPrice &&
+        activeSig.status === 'ACTIVE' &&
+        !activeSig.isTradeComplete &&
+        !clearedSignalIds.has(activeSig.id) &&
+        activeSig.asset === symbol ? (
           <div className="p-2 rounded bg-[#10131d] border border-amber-500/30 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
             <div className="flex items-center gap-2.5 flex-wrap">
               <span
                 className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                  activeSignal.direction === 'UP'
+                  activeSig.direction === 'UP'
                     ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
                     : 'bg-red-500/20 text-red-400 border border-red-500/40'
                 }`}
               >
-                {activeSignal.direction === 'UP' ? 'LONG SETUP' : 'SHORT SETUP'}
+                {activeSig.direction === 'UP' ? 'LONG SETUP' : 'SHORT SETUP'}
               </span>
-              <span className="font-semibold text-white">{activeSignal.setupType}</span>
+              <span className="font-semibold text-white">{activeSig.setupType}</span>
               <span className="text-slate-400">
-                Entry: <strong className="text-white">${formatPrice(activeSignal.entryPrice)}</strong>
+                Entry: <strong className="text-white">${formatPrice(activeSig.entryPrice)}</strong>
               </span>
               <span className="text-slate-400 flex items-center gap-1">
-                TP #1: <strong className="text-emerald-400">${formatPrice(activeSignal.takeProfit1 || activeSignal.takeProfit)}</strong>
-                {activeSignal.tp1Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded font-bold">HIT</span>}
+                TP #1: <strong className="text-emerald-400">${formatPrice(activeSig.takeProfit1 || activeSig.takeProfit)}</strong>
+                {activeSig.tp1Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded font-bold">HIT</span>}
               </span>
-              {activeSignal.takeProfit2 ? (
+              {activeSig.takeProfit2 ? (
                 <span className="text-slate-400 flex items-center gap-1">
-                  TP #2: <strong className="text-emerald-400">${formatPrice(activeSignal.takeProfit2)}</strong>
-                  {activeSignal.tp2Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded font-bold">HIT</span>}
+                  TP #2: <strong className="text-emerald-400">${formatPrice(activeSig.takeProfit2)}</strong>
+                  {activeSig.tp2Hit && <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 rounded font-bold">HIT</span>}
                 </span>
               ) : null}
               <span className="text-slate-400">
-                SL: <strong className="text-red-400">${formatPrice(activeSignal.stopLoss)}</strong>
+                SL: <strong className="text-red-400">${formatPrice(activeSig.stopLoss)}</strong>
               </span>
               <span className="text-slate-400 hidden sm:inline">
-                R:R: <strong className="text-indigo-300">1:{(activeSignal.rewardRiskRatio || (Math.abs((activeSignal.takeProfit1 || activeSignal.takeProfit) - activeSignal.entryPrice) / (Math.abs(activeSignal.entryPrice - activeSignal.stopLoss) || 1))).toFixed(2)}</strong>
+                R:R: <strong className="text-indigo-300">1:{(activeSig.rewardRiskRatio || (Math.abs((activeSig.takeProfit1 || activeSig.takeProfit) - activeSig.entryPrice) / (Math.abs(activeSig.entryPrice - activeSig.stopLoss) || 1))).toFixed(2)}</strong>
               </span>
-              {activeSignal.displayMessage && (
+              {activeSig.displayMessage && (
                 <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[10.5px] font-bold">
-                  {activeSignal.displayMessage}
+                  {activeSig.displayMessage}
                 </span>
               )}
             </div>
             <div className="flex items-center gap-2">
-              {activeSignal.aiValidation && (
-                <span
-                  className={`px-1.5 py-0.2 rounded text-[10px] font-bold border ${
-                    activeSignal.aiValidation.status === 'allow'
-                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                      : activeSignal.aiValidation.status === 'reject'
-                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
-                      : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
-                  }`}
-                >
-                  AI: {activeSignal.aiValidation.status.toUpperCase()}
-                </span>
-              )}
-              {activeSignal.marketRegime && (
-                <span className="px-1.5 py-0.2 rounded text-[10px] bg-[#1a1d28] text-slate-300 border border-[#282c3d] capitalize hidden sm:inline">
-                  {activeSignal.marketRegime.replace(/_/g, ' ')}
-                </span>
-              )}
               <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                WATCHING LIVE
+                ACTIVE
               </span>
-              <span className="text-[10px] text-slate-400">{activeSignal.confidence}% Conf.</span>
             </div>
           </div>
-        ) : activeSignal &&
-          (clearedSignalIds.has(activeSignal.id) || activeSignal.isTradeComplete || activeSignal.status === 'LOSS' || activeSignal.status === 'WIN' || activeSignal.status === 'EXPIRED') &&
-          activeSignal.asset === symbol ? (
+        ) : activeSig &&
+          (clearedSignalIds.has(activeSig.id) || activeSig.isTradeComplete || activeSig.status === 'LOSS' || activeSig.status === 'WIN' || activeSig.status === 'EXPIRED') &&
+          activeSig.asset === symbol ? (
           <div className="p-2 rounded bg-[#091414] border border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
             <div className="flex items-center gap-2">
               <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
                 TRADE SETTLED
               </span>
-              <span className="text-slate-300 font-semibold">{activeSignal.setupType}</span>
+              <span className="text-slate-300 font-semibold">{activeSig.setupType}</span>
               <span className="text-slate-400">
-                Entry: ${formatPrice(activeSignal.entryPrice)} • TP #1: ${formatPrice(activeSignal.takeProfit1 || activeSignal.takeProfit)} • TP #2: ${formatPrice(activeSignal.takeProfit2 || activeSignal.entryPrice)} • SL: ${formatPrice(activeSignal.stopLoss)}
+                Entry: ${formatPrice(activeSig.entryPrice)} • TP #1: ${formatPrice(activeSig.takeProfit1 || activeSig.takeProfit)} • TP #2: ${formatPrice(activeSig.takeProfit2 || activeSig.entryPrice)} • SL: ${formatPrice(activeSig.stopLoss)}
               </span>
             </div>
             <div className="text-[11px] text-emerald-400 font-bold">
-              {activeSignal.displayMessage || 'Trade Completed • Lines Removed from Active Chart'}
+              {activeSig.displayMessage || 'Trade Completed • Lines Removed from Active Chart'}
             </div>
           </div>
         ) : (
@@ -3019,7 +3052,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                         <span className={`font-bold ${isBull ? 'text-emerald-400' : 'text-red-400'}`}>
                           {p.name}
                         </span>
-                        <span className="text-[10px] text-slate-500">{p.confidence}% Score</span>
+                        <span className="text-[10px] text-slate-500 font-mono">{timeframe}</span>
                       </div>
                       <p className="text-[11px] text-slate-400 mt-1 leading-snug">
                         {p.description}
@@ -3039,7 +3072,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         {/* Educational Market Disclaimer */}
         <div className="px-3.5 py-2 text-[10px] text-slate-500 font-mono flex items-center justify-between">
           <span>Educational market analysis terminal. Not financial advice.</span>
-          <span>NWWT Confluence</span>
+          <span>NWWT Terminal</span>
         </div>
       </div>
 
@@ -3082,9 +3115,31 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         onClose={() => setIsScanModalOpen(false)}
         isLoading={isScanningAsset}
         evaluation={scanEvaluation}
+        signal={scannedSignal}
         asset={symbol}
         timeframe={timeframe}
         onRescan={handleScanChartAsset}
+        onSeeChart={(targetAsset, targetTf, sig) => {
+          if (sig) {
+            setLocalSignal(sig);
+            removeClearedSignalId(sig.id);
+            setClearedSignalIds((prev) => {
+              if (prev.has(sig.id)) {
+                const next = new Set(prev);
+                next.delete(sig.id);
+                return next;
+              }
+              return prev;
+            });
+          }
+          if (onSelectSymbol) {
+            onSelectSymbol(targetAsset, targetTf, sig);
+          }
+          if (targetTf && targetTf !== timeframe && onTimeframeChange) {
+            onTimeframeChange(targetTf as Timeframe);
+          }
+          setIsScanModalOpen(false);
+        }}
       />
     </div>
   );

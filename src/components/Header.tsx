@@ -87,14 +87,14 @@ export const Header: React.FC<HeaderProps> = ({
 
         <button
           onClick={() => onTabChange('scanner')}
-          className={`flex items-center gap-1 sm:gap-1.5 px-1.5 sm:px-3 py-1 rounded text-[10px] sm:text-xs font-mono font-medium transition cursor-pointer whitespace-nowrap ${
+          className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1 sm:py-1 rounded text-[10.5px] sm:text-xs font-mono transition cursor-pointer whitespace-nowrap ${
             activeTab === 'scanner'
-              ? 'bg-amber-500 text-black font-bold shadow-sm'
-              : 'text-slate-400 hover:text-white'
+              ? 'bg-gradient-to-r from-amber-400 to-amber-500 text-black font-black shadow-md shadow-amber-500/20 ring-1 ring-amber-300'
+              : 'text-amber-400 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/25 font-bold'
           }`}
           title="Market Structure Scanner"
         >
-          <Zap className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-amber-400 shrink-0" />
+          <Zap className={`w-3.5 h-3.5 shrink-0 ${activeTab === 'scanner' ? 'text-black' : 'text-amber-400'}`} />
           <span>Scanner</span>
         </button>
       </nav>

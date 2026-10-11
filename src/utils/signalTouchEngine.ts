@@ -70,6 +70,23 @@ export function addClearedSignalId(signalId: string): void {
 }
 
 /**
+ * Removes a signal ID from the cleared set (e.g. when user explicitly scans or selects it)
+ */
+export function removeClearedSignalId(signalId: string): void {
+  if (!signalId) return;
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const current = loadClearedSignalIds();
+    if (current.has(signalId)) {
+      current.delete(signalId);
+      localStorage.setItem(CLEARED_SIGNALS_STORAGE_KEY, JSON.stringify(Array.from(current)));
+    }
+  } catch (err) {
+    console.warn('[SignalTouchEngine] Failed to remove cleared signal ID:', err);
+  }
+}
+
+/**
  * Checks whether a signal's Take Profit (TP #1, TP #2) or Stop Loss has been touched or crossed.
  * Evaluates live Binance price ticks and actual candle high & low wicks.
  * Does NOT use 24-hour ticker extremes to prevent false touches.
@@ -170,23 +187,26 @@ export function checkSignalTouch(
           };
         }
         if (tp1Hit) {
+          addClearedSignalId(signal.id);
           return {
             isTouched: true,
             touchedLevel: 'TP1',
             touchPrice: tp1,
             touchTimestamp: now,
-            reason: `Take profit #1 reached at $${currentPrice.toFixed(2)}`,
-            displayMessage: `tp #1 hit | r:r ${rrStr} | win`,
-            isTradeComplete: false
+            reason: `Take profit reached at $${currentPrice.toFixed(2)}`,
+            displayMessage: `tp hit | r:r ${rrStr} | win`,
+            isTradeComplete: true
           };
         }
         if (slHit) {
+          addClearedSignalId(signal.id);
           return {
             isTouched: true,
             touchedLevel: 'SL',
             touchPrice: sl,
             touchTimestamp: now,
             reason: `Stop loss touched at $${currentPrice.toFixed(2)}`,
+            displayMessage: `stop loss hit | loss`,
             isTradeComplete: true
           };
         }
@@ -197,6 +217,7 @@ export function checkSignalTouch(
         const slHit = currentPrice >= sl;
 
         if (tp1Hit && slHit) {
+          addClearedSignalId(signal.id);
           return {
             isTouched: true,
             touchedLevel: 'BOTH',
@@ -207,6 +228,7 @@ export function checkSignalTouch(
           };
         }
         if (tp2Hit) {
+          addClearedSignalId(signal.id);
           return {
             isTouched: true,
             touchedLevel: 'TP2',
@@ -218,23 +240,26 @@ export function checkSignalTouch(
           };
         }
         if (tp1Hit) {
+          addClearedSignalId(signal.id);
           return {
             isTouched: true,
             touchedLevel: 'TP1',
             touchPrice: tp1,
             touchTimestamp: now,
-            reason: `Take profit #1 reached at $${currentPrice.toFixed(2)}`,
-            displayMessage: `tp #1 hit | r:r ${rrStr} | win`,
-            isTradeComplete: false
+            reason: `Take profit reached at $${currentPrice.toFixed(2)}`,
+            displayMessage: `tp hit | r:r ${rrStr} | win`,
+            isTradeComplete: true
           };
         }
         if (slHit) {
+          addClearedSignalId(signal.id);
           return {
             isTouched: true,
             touchedLevel: 'SL',
             touchPrice: sl,
             touchTimestamp: now,
             reason: `Stop loss touched at $${currentPrice.toFixed(2)}`,
+            displayMessage: `stop loss hit | loss`,
             isTradeComplete: true
           };
         }
@@ -304,23 +329,26 @@ export function checkSignalTouch(
             };
           }
           if (tp1Hit) {
+            addClearedSignalId(signal.id);
             return {
               isTouched: true,
               touchedLevel: 'TP1',
               touchPrice: tp1,
               touchTimestamp: candle.openTime,
-              reason: `Take profit #1 reached on candle wick high at $${candle.high.toFixed(2)}`,
-              displayMessage: `tp #1 hit | r:r ${rrStr} | win`,
-              isTradeComplete: false
+              reason: `Take profit reached on candle wick high at $${candle.high.toFixed(2)}`,
+              displayMessage: `tp hit | r:r ${rrStr} | win`,
+              isTradeComplete: true
             };
           }
           if (slHit) {
+            addClearedSignalId(signal.id);
             return {
               isTouched: true,
               touchedLevel: 'SL',
               touchPrice: sl,
               touchTimestamp: candle.openTime,
               reason: `Stop loss reached on candle wick low at $${candle.low.toFixed(2)}`,
+              displayMessage: `stop loss hit | loss`,
               isTradeComplete: true
             };
           }
@@ -331,6 +359,7 @@ export function checkSignalTouch(
           const slHit = candle.high >= sl;
 
           if (tp1Hit && slHit) {
+            addClearedSignalId(signal.id);
             return {
               isTouched: true,
               touchedLevel: 'BOTH',
@@ -341,6 +370,7 @@ export function checkSignalTouch(
             };
           }
           if (tp2Hit) {
+            addClearedSignalId(signal.id);
             return {
               isTouched: true,
               touchedLevel: 'TP2',
@@ -352,23 +382,26 @@ export function checkSignalTouch(
             };
           }
           if (tp1Hit) {
+            addClearedSignalId(signal.id);
             return {
               isTouched: true,
               touchedLevel: 'TP1',
               touchPrice: tp1,
               touchTimestamp: candle.openTime,
-              reason: `Take profit #1 reached on candle wick low at $${candle.low.toFixed(2)}`,
-              displayMessage: `tp #1 hit | r:r ${rrStr} | win`,
-              isTradeComplete: false
+              reason: `Take profit reached on candle wick low at $${candle.low.toFixed(2)}`,
+              displayMessage: `tp hit | r:r ${rrStr} | win`,
+              isTradeComplete: true
             };
           }
           if (slHit) {
+            addClearedSignalId(signal.id);
             return {
               isTouched: true,
               touchedLevel: 'SL',
               touchPrice: sl,
               touchTimestamp: candle.openTime,
               reason: `Stop loss reached on candle wick high at $${candle.high.toFixed(2)}`,
+              displayMessage: `stop loss hit | loss`,
               isTradeComplete: true
             };
           }

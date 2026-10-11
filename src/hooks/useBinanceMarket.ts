@@ -228,29 +228,18 @@ export function useBinanceMarket() {
     };
   }, [connect]);
 
-  // Request server to run scanner on chosen timeframe with optional HTF confirmation parameters
-  const triggerScan = useCallback((
-    timeframe: Timeframe = '15m',
-    options?: {
-      htfConfirmationEnabled?: boolean;
-      htfTimeframe?: Timeframe;
-      htfRuleMode?: 'lenient' | 'aligned' | 'strict';
-    }
-  ) => {
+  // Request server to run scanner on chosen timeframe
+  const triggerScan = useCallback((timeframe: Timeframe = '15m') => {
     setScannerState((prev) => ({
       ...prev,
       status: 'scanning',
-      timeframe,
-      ...(options?.htfConfirmationEnabled !== undefined ? { htfConfirmationEnabled: options.htfConfirmationEnabled } : {}),
-      ...(options?.htfTimeframe ? { htfTimeframe: options.htfTimeframe } : {}),
-      ...(options?.htfRuleMode ? { htfRuleMode: options.htfRuleMode } : {})
+      timeframe
     }));
 
     const ws = socketRef.current;
     const payload = {
       type: 'run_scan',
-      timeframe,
-      ...(options || {})
+      timeframe
     };
 
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -261,7 +250,7 @@ export function useBinanceMarket() {
     fetch(`/api/scanner/config`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ timeframe, ...(options || {}) })
+      body: JSON.stringify({ timeframe })
     })
       .then((res) => res.json())
       .then((data) => {

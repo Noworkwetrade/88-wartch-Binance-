@@ -559,9 +559,12 @@ class ScannerService {
             signal.tp1Hit = true;
             signal.tp1HitTimestamp = now;
             signal.tp1Price = tp1;
+            signal.isTradeComplete = true;
             signal.status = 'WIN';
-            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
-            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.displayMessage = `tp hit | r:r ${rrStr} | win`;
+            signal.statusReason = `tp hit | r:r ${rrStr} | win`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
             signal.exitPrice = tp1;
             signal.pnlPercent = Math.abs(((tp1 - signal.entryPrice) / signal.entryPrice) * 100);
             hasChanges = true;
@@ -648,9 +651,12 @@ class ScannerService {
             signal.tp1Hit = true;
             signal.tp1HitTimestamp = now;
             signal.tp1Price = tp1;
+            signal.isTradeComplete = true;
             signal.status = 'WIN';
-            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
-            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win`;
+            signal.displayMessage = `tp hit | r:r ${rrStr} | win`;
+            signal.statusReason = `tp hit | r:r ${rrStr} | win`;
+            signal.completedAt = now;
+            signal.durationMs = now - signal.timestamp;
             signal.exitPrice = tp1;
             signal.pnlPercent = Math.abs(((signal.entryPrice - tp1) / signal.entryPrice) * 100);
             hasChanges = true;
@@ -930,6 +936,33 @@ class ScannerService {
     }
   }
 
+  sanitizeSignalForPublic(s) {
+    if (!s) return null;
+    return {
+      id: s.id,
+      asset: s.asset,
+      timeframe: s.timeframe,
+      direction: s.direction,
+      setupType: s.setupType || (s.direction === 'UP' ? 'Long Setup' : 'Short Setup'),
+      entryPrice: s.entryPrice || s.signalPrice,
+      signalPrice: s.signalPrice || s.entryPrice,
+      stopLoss: s.stopLoss,
+      takeProfit: s.takeProfit || s.takeProfit1,
+      takeProfit1: s.takeProfit1 || s.takeProfit,
+      takeProfit2: s.takeProfit2,
+      rewardRiskRatio: s.rewardRiskRatio,
+      timestamp: s.timestamp,
+      confirmedCandleCloseTime: s.confirmedCandleCloseTime || s.timestamp,
+      status: s.status,
+      tp1Hit: s.tp1Hit,
+      tp2Hit: s.tp2Hit,
+      isTradeComplete: s.isTradeComplete,
+      completedAt: s.completedAt,
+      exitPrice: s.exitPrice,
+      pnlPercent: s.pnlPercent
+    };
+  }
+
   /**
    * Scans specifically the asset selected on the active chart.
    * Does NOT scan a random asset. Does NOT switch the selected asset.
@@ -941,14 +974,12 @@ class ScannerService {
 
     // Permanently excluded assets must never receive strategy analysis
     if (isPermanentlyExcludedSymbol(symbol)) {
-      const excludedResult = createPermanentlyExcludedResult(symbol, timeframe);
       return {
         asset: symbol,
         timeframe,
-        signal: null,
-        pendingRetest: null,
-        qualityResult: excludedResult,
-        message: excludedResult.rejectionReason
+        hasSetup: false,
+        action: 'NO SETUP',
+        message: 'no valid setup found'
       };
     }
 
@@ -958,9 +989,9 @@ class ScannerService {
         return {
           asset: symbol,
           timeframe,
-          signal: null,
-          pendingRetest: null,
-          message: 'Insufficient historical candle data.'
+          hasSetup: false,
+          action: 'NO SETUP',
+          message: 'no valid setup found'
         };
       }
 
@@ -978,9 +1009,9 @@ class ScannerService {
         return {
           asset: symbol,
           timeframe,
-          signal: null,
-          pendingRetest: null,
-          message: 'Awaiting confirmed candle close.'
+          hasSetup: false,
+          action: 'NO SETUP',
+          message: 'no valid setup found'
         };
       }
 
@@ -1028,52 +1059,9 @@ class ScannerService {
         return {
           asset: symbol,
           timeframe,
-          currentPrice,
-          confirmedCandleCloseTime,
-          qualityResult: analysis.qualityResult,
-          signal: null,
-          originalSignal: null,
-          inverseSignal: null,
-          aiFilteredSignal: null,
-          aiFilteredInverseSignal: null,
-          pendingRetest: null,
-          message: `Market Structure Quality: ${analysis.qualityResult.qualityGrade.toUpperCase()} (${analysis.qualityResult.qualityScore}/100). ${analysis.qualityResult.rejectionReason}`,
-          scannedAt: Date.now(),
-          evaluation: {
-            asset: symbol,
-            timeframe,
-            currentPrice,
-            marketStructure: {
-              regime: analysis.regimeData?.regime || 'Poor / Untradable',
-              qualityGrade: analysis.qualityResult.qualityGrade,
-              qualityScore: analysis.qualityResult.qualityScore,
-              isTradable: false,
-              summary: analysis.qualityResult.rejectionReason
-            },
-            formingSetup: {
-              detected: false,
-              type: 'None',
-              description: 'Market structure quality filter rejected asset. Structure is too noisy, choppy, or compressed.',
-              ruleNote: 'Forming setup does not equal a signal. No signal before the required candle closes.',
-              status: 'REJECTED BY QUALITY LAYER'
-            },
-            confirmedSetup: {
-              isConfirmed: false,
-              setupType: 'None - No Valid Setup Found',
-              direction: null,
-              confirmedAtCloseTime: confirmedCandleCloseTime
-            },
-            strongestStrategy: {
-              name: 'None qualifying',
-              confidence: 0,
-              status: 'REJECTED BY QUALITY LAYER'
-            },
-            action: 'NO SETUP',
-            actionLabel: 'NO VALID SETUP FOUND',
-            exactReason: analysis.qualityResult.rejectionReason,
-            rejectionOrAcceptanceStatus: 'REJECTED (MARKET STRUCTURE QUALITY)',
-            tradeLevels: null
-          }
+          hasSetup: false,
+          action: 'NO SETUP',
+          message: 'no valid setup found'
         };
       }
 
@@ -1157,117 +1145,40 @@ class ScannerService {
         ? Math.min(...validResistances)
         : Math.max(...closedCandles.slice(-25).map((c) => c.high));
 
-      // Inspect currently forming candle (rawCandles last item)
-      const rawLast = rawCandles[rawCandles.length - 1];
-      const isRawLastForming = rawLast && (rawLast.isClosed === false || rawLast.closeTime > now || (rawLast.openTime + tfDuration > now));
-      const formingCandle = isRawLastForming ? rawLast : null;
-
-      let isFormingSetup = false;
-      let formingSetupType = 'None';
-      let formingSetupDesc = `Current open candle ($${currentPrice.toFixed(2)}) is fluctuating within structural boundaries (Support: $${structuralSupport.toFixed(2)} - Resistance: $${structuralResistance.toFixed(2)}).`;
-
-      if (formingCandle) {
-        if (lastClosedCandle.close <= structuralResistance && formingCandle.close > structuralResistance) {
-          isFormingSetup = true;
-          formingSetupType = 'Breakout Probing Resistance';
-          formingSetupDesc = `Current open candle is actively probing above swing resistance ($${structuralResistance.toFixed(2)}) at $${formingCandle.close.toFixed(2)}. Unconfirmed until candle closes.`;
-        } else if (lastClosedCandle.close >= structuralSupport && formingCandle.close < structuralSupport) {
-          isFormingSetup = true;
-          formingSetupType = 'Breakdown Probing Support';
-          formingSetupDesc = `Current open candle is actively probing below swing support ($${structuralSupport.toFixed(2)}) at $${formingCandle.close.toFixed(2)}. Unconfirmed until candle closes.`;
-        } else if (analysis.pendingRetest) {
-          isFormingSetup = true;
-          formingSetupType = 'Pullback / Retest in Progress';
-          formingSetupDesc = `Price is currently testing level $${analysis.pendingRetest.targetLevel.toFixed(2)}. Awaiting candle close confirmation.`;
-        }
-      }
-
-      let exactReason = '';
       if (confirmedSignal) {
-        exactReason = confirmedSignal.reason;
-      } else if (htfStatusReason) {
-        exactReason = htfStatusReason;
-      } else {
-        const c0 = closedCandles[closedCandles.length - 1];
-        const failedBreakRetest = `Break & Retest: No confirmed retest rejection of previous breakout level ($${structuralResistance.toFixed(2)} / $${structuralSupport.toFixed(2)}).`;
-        const failedBOS = `Strong Breakout (BOS): Closed candle ($${c0.close.toFixed(2)}) did not close with decisive breakout momentum outside structure.`;
-        const failedFakeout = `Fakeout Rejection: No liquidity sweep with >45% opposite wick absorption.`;
-        const failedEngulfing = `Engulfing Confirmation: Closed candle does not engulf previous body at key structure.`;
-        exactReason = `No existing strategy qualified on the confirmed candle close.\n• ${failedBreakRetest}\n• ${failedBOS}\n• ${failedFakeout}\n• ${failedEngulfing}`;
+        const sanitizedSignal = this.sanitizeSignalForPublic(confirmedSignal);
+        return {
+          asset: symbol,
+          timeframe,
+          hasSetup: true,
+          action: confirmedSignal.direction === 'UP' ? 'BUY' : 'SELL',
+          direction: confirmedSignal.direction,
+          signal: sanitizedSignal,
+          tradeLevels: {
+            entryPrice: confirmedSignal.entryPrice,
+            stopLoss: confirmedSignal.stopLoss,
+            takeProfit1: confirmedSignal.takeProfit1,
+            takeProfit2: confirmedSignal.takeProfit2,
+            rewardRiskRatio: confirmedSignal.rewardRiskRatio
+          }
+        };
       }
-
-      const evaluation = {
-        asset: symbol,
-        timeframe,
-        currentPrice,
-        marketStructure: {
-          regime: analysis.regimeData?.regime || 'Ranging',
-          qualityGrade: analysis.qualityResult?.qualityGrade || 'ACCEPTABLE',
-          qualityScore: analysis.qualityResult?.qualityScore || 0,
-          isTradable: analysis.qualityResult?.isTradable ?? true,
-          swingHigh: confirmedSwingHigh,
-          swingLow: confirmedSwingLow,
-          support: structuralSupport,
-          resistance: structuralResistance,
-          summary: analysis.qualityResult?.rejectionReason || `Market regime is ${analysis.regimeData?.regime || 'ranging'}. Quality score is ${analysis.qualityResult?.qualityScore || 0}/100 (${analysis.qualityResult?.qualityGrade || 'ACCEPTABLE'}).`
-        },
-        formingSetup: {
-          detected: isFormingSetup,
-          type: formingSetupType,
-          description: formingSetupDesc,
-          ruleNote: 'Forming setup does not equal a signal. No signal before the required candle closes.',
-          status: 'UNCONFIRMED - Candle Still Forming'
-        },
-        confirmedSetup: {
-          isConfirmed: Boolean(confirmedSignal),
-          setupType: confirmedSignal ? confirmedSignal.setupType : (htfStatusReason ? 'Rejected by Higher Timeframe Filter' : 'None - No Valid Setup Found'),
-          direction: confirmedSignal ? confirmedSignal.direction : null,
-          confirmedAtCloseTime: confirmedCandleCloseTime
-        },
-        strongestStrategy: {
-          name: confirmedSignal ? confirmedSignal.setupType : (htfStatusReason ? 'Rejected by HTF' : 'None qualifying'),
-          confidence: confirmedSignal ? confirmedSignal.confidence : 0,
-          status: confirmedSignal ? 'QUALIFIED & CONFIRMED' : (htfStatusReason ? 'REJECTED BY HTF CONFIRMATION' : 'NO STRATEGY QUALIFIED')
-        },
-        action: confirmedSignal ? (confirmedSignal.direction === 'UP' ? 'BUY' : 'SELL') : 'NO SETUP',
-        actionLabel: confirmedSignal ? (confirmedSignal.direction === 'UP' ? 'BUY (CONFIRMED)' : 'SELL (CONFIRMED)') : (htfStatusReason ? 'REJECTED BY HTF' : 'NO VALID SETUP FOUND'),
-        exactReason,
-        rejectionOrAcceptanceStatus: confirmedSignal ? 'ACCEPTED' : (htfStatusReason ? 'REJECTED (HIGHER TIMEFRAME)' : 'REJECTED (NO STRATEGY QUALIFIED)'),
-        tradeLevels: confirmedSignal ? {
-          entryPrice: confirmedSignal.entryPrice,
-          stopLoss: confirmedSignal.stopLoss,
-          takeProfit1: confirmedSignal.takeProfit1,
-          takeProfit2: confirmedSignal.takeProfit2,
-          rewardRiskRatio: confirmedSignal.rewardRiskRatio
-        } : null,
-        htfConfirmation: htfEvaluation || (confirmedSignal ? confirmedSignal.htfConfirmation : null)
-      };
 
       return {
         asset: symbol,
         timeframe,
-        currentPrice,
-        confirmedCandleCloseTime,
-        regimeData: analysis.regimeData,
-        qualityResult: analysis.qualityResult,
-        signal: confirmedSignal,
-        originalSignal: analysis.originalSignal,
-        inverseSignal: analysis.inverseSignal,
-        aiFilteredSignal: analysis.aiFilteredSignal,
-        aiFilteredInverseSignal: analysis.aiFilteredInverseSignal,
-        pendingRetest: analysis.pendingRetest,
-        htfConfirmation: htfEvaluation,
-        scannedAt: Date.now(),
-        evaluation
+        hasSetup: false,
+        action: 'NO SETUP',
+        message: 'no valid setup found'
       };
     } catch (err) {
       console.warn(`[scannerService] Error scanning single asset ${symbol}:`, err.message);
       return {
         asset: symbol,
         timeframe,
-        signal: null,
-        pendingRetest: null,
-        error: err.message
+        hasSetup: false,
+        action: 'NO SETUP',
+        message: 'no valid setup found'
       };
     }
   }
@@ -1810,15 +1721,18 @@ class ScannerService {
 
   getScanData() {
     const all = Array.from(this.performanceSignals.values()).filter(
-      (s) => !isPermanentlyExcludedSymbol(s.asset)
+      (s) => !isPermanentlyExcludedSymbol(s.asset) && s.modelType !== 'inverse' && s.modelType !== 'ai_filtered_inverse'
     );
     const activeSignals = all
-      .filter((s) => s.status === 'ACTIVE')
-      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      .filter((s) => s.status === 'ACTIVE' && !s.isTradeComplete && !s.tp1Hit && !s.tp2Hit)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .map((s) => this.sanitizeSignalForPublic(s));
 
     const completedSignals = all
-      .filter((s) => s.status !== 'ACTIVE')
-      .sort((a, b) => (b.completedAt || b.timestamp || 0) - (a.completedAt || a.timestamp || 0));
+      .filter((s) => s.status !== 'ACTIVE' || s.isTradeComplete || s.tp1Hit || s.tp2Hit)
+      .sort((a, b) => (b.completedAt || b.timestamp || 0) - (a.completedAt || a.timestamp || 0))
+      .slice(0, 500)
+      .map((s) => this.sanitizeSignalForPublic(s));
 
     return {
       status: this.status,
@@ -1826,18 +1740,10 @@ class ScannerService {
       scannedCount: this.scannedCount,
       totalSymbols: marketCache.tickers.size,
       lastScanTime: this.lastScanTime,
-      signals: activeSignals, // ONLY genuinely active signals in active scanner!
-      completedSignals: completedSignals.slice(0, 500),
+      signals: activeSignals,
+      completedSignals,
       activeCount: activeSignals.length,
-      completedCount: completedSignals.length,
-      pendingRetests: this.pendingRetests.filter((p) => !isPermanentlyExcludedSymbol(p.asset)),
-      performance: this.computePerformanceStats(),
-      qualityDiagnostics: this.getQualityDiagnostics(),
-      // Multi-Timeframe and Fair Coverage Metrics
-      htfConfirmationEnabled: Boolean(this.htfConfirmationEnabled),
-      htfTimeframe: this.htfTimeframe || getLogicalHigherTimeframe(this.timeframe),
-      htfRuleMode: this.htfRuleMode || 'lenient',
-      coverageMetrics: this.coverageStats
+      completedCount: completedSignals.length
     };
   }
 

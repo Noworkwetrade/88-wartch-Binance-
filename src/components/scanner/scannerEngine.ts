@@ -533,7 +533,7 @@ export function runChartScan(
     signal = 'NO SETUP';
     setupQuality = 'NONE';
     keyPriceArea = `Current: $${currentPrice.toFixed(2)}`;
-    reason = `Market Structure Quality Filter: ${qualityResult.rejectionReason}`;
+    reason = `Market Structure: ${qualityResult.rejectionReason}`;
     invalidationLevel = currentPrice;
   }
   // ----------------------------------------------------
@@ -764,7 +764,7 @@ export function runChartScan(
 
   // Educational narrative
   const educationalSummary = !qualityResult.isTradable
-    ? `Market Structure Quality Rejection on ${asset} (${timeframe}): ${qualityResult.rejectionReason} Asset filtered before strategy evaluation.`
+    ? `Market Structure on ${asset} (${timeframe}): ${qualityResult.rejectionReason}`
     : `Decision: ${signal} (${setupQuality} Quality) on ${asset} (${timeframe}) at $${currentPrice.toFixed(2)}. Market condition: ${marketCondition}. ${reason} Invalidation level: $${invalidationLevel.toFixed(2)}. Analysis strictly for educational purposes based on OHLCV confluence. Not financial advice.`;
 
   return {

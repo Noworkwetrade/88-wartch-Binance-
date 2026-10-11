@@ -45,13 +45,17 @@ export function useSignalPerformance(
     setSignals(merged);
   }, [incomingSignals, incomingCompleted]);
 
-  // Synchronize when a signal is settled on chart
+  // Synchronize when a signal is settled or cleared on chart
   useEffect(() => {
     const handleSettled = () => {
       setSignals(loadStoredSignals());
     };
     window.addEventListener('nwwt_signal_settled', handleSettled);
-    return () => window.removeEventListener('nwwt_signal_settled', handleSettled);
+    window.addEventListener('nwwt_signal_cleared', handleSettled);
+    return () => {
+      window.removeEventListener('nwwt_signal_settled', handleSettled);
+      window.removeEventListener('nwwt_signal_cleared', handleSettled);
+    };
   }, []);
 
   // 3. Monitor active signals using live market ticks
@@ -60,7 +64,9 @@ export function useSignalPerformance(
 
   useEffect(() => {
     const clearedSet = loadClearedSignalIds();
-    const activeList = signalsRef.current.filter((s) => s.status === 'ACTIVE' && !clearedSet.has(s.id));
+    const activeList = signalsRef.current.filter(
+      (s) => s.status === 'ACTIVE' && !s.isTradeComplete && !s.tp1Hit && !clearedSet.has(s.id)
+    );
     if (activeList.length === 0) return;
 
     const now = Date.now();
@@ -89,16 +95,54 @@ export function useSignalPerformance(
     }
   }, [tickersMap]);
 
+  // Periodic fallback check every 600ms to guarantee any active signal is evaluated against latest ticker prices
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const clearedSet = loadClearedSignalIds();
+      const activeList = signalsRef.current.filter(
+        (s) => s.status === 'ACTIVE' && !s.isTradeComplete && !s.tp1Hit && !clearedSet.has(s.id)
+      );
+      if (activeList.length === 0) return;
+
+      let anyChanged = false;
+      let currentSignals = signalsRef.current;
+
+      for (const active of activeList) {
+        const ticker = tickersMap.get(active.asset);
+        if (!ticker || ticker.lastPrice === '--') continue;
+
+        const lastPrice = parseFloat(ticker.lastPrice);
+        const res = evaluateSignalsWithTicker(currentSignals, active.asset, lastPrice);
+        if (res.changed) {
+          currentSignals = res.updatedSignals;
+          anyChanged = true;
+        }
+      }
+
+      if (anyChanged) {
+        setSignals(currentSignals);
+        saveStoredSignals(currentSignals);
+      }
+    }, 600);
+
+    return () => clearInterval(timer);
+  }, [tickersMap]);
+
   // 4. Derived collections and metrics
-  // STRICT REQUIREMENT 2 & 4: Active signals only contain genuinely active, uncleared setups
+  // STRICT REQUIREMENT: Active signals ONLY contain genuinely active, uncleared setups.
+  // Any signal that reached TP or SL is immediately counted as win/loss and excluded from active signals!
   const activeSignals = useMemo(() => {
     const clearedSet = loadClearedSignalIds();
-    return signals.filter((s) => s.status === 'ACTIVE' && !clearedSet.has(s.id));
+    return signals.filter(
+      (s) => s.status === 'ACTIVE' && !s.isTradeComplete && !s.tp1Hit && !clearedSet.has(s.id)
+    );
   }, [signals]);
 
   const completedSignals = useMemo(() => {
     const clearedSet = loadClearedSignalIds();
-    return signals.filter((s) => s.status !== 'ACTIVE' || clearedSet.has(s.id));
+    return signals.filter(
+      (s) => s.status !== 'ACTIVE' || s.isTradeComplete || s.tp1Hit || clearedSet.has(s.id)
+    );
   }, [signals]);
 
   const stats: SignalPerformanceStats = useMemo(() => {

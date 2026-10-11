@@ -106,7 +106,6 @@ class ClientSocketServer {
     try {
       const allTickers = marketCache.getAllTickers();
       const status = binanceSocket.getAggregateStatus();
-      const stats = binanceSocket.getConnectionStats();
       const scanData = scannerService.getScanData();
 
       const payload = {
@@ -114,7 +113,6 @@ class ClientSocketServer {
         data: {
           status,
           totalSymbols: symbolManager.getTotalCount(),
-          connections: stats,
           tickers: allTickers,
           scanner: scanData,
           timestamp: Date.now()
@@ -218,13 +216,12 @@ class ClientSocketServer {
     }
   }
 
-  broadcastStatus(status, stats) {
+  broadcastStatus(status) {
     if (this.clients.size === 0) return;
     const message = JSON.stringify({
       type: 'status',
       data: {
         status,
-        connections: stats,
         totalSymbols: symbolManager.getTotalCount(),
         timestamp: Date.now()
       }

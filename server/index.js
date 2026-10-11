@@ -42,9 +42,6 @@ app.use((req, res, next) => {
 app.get('/api/status', (req, res) => {
   res.json({
     status: binanceSocket.getAggregateStatus(),
-    pool: binanceSocket.getConnectionStats(),
-    cache: marketCache.getStats(),
-    clientConnections: clientSocket.clients.size,
     totalSymbols: symbolManager.getTotalCount(),
     timestamp: Date.now()
   });
@@ -120,14 +117,11 @@ app.get('/api/scanner', (req, res) => {
 });
 
 app.get('/api/scanner/performance', (req, res) => {
-  res.json(scannerService.computePerformanceStats());
+  res.status(404).json({ error: 'Endpoint unavailable' });
 });
 
 app.get('/api/scanner/diagnostics', (req, res) => {
-  res.json({
-    diagnostics: scannerService.getQualityDiagnostics(),
-    count: scannerService.qualityDiagnostics.size
-  });
+  res.status(404).json({ error: 'Endpoint unavailable' });
 });
 
 app.post('/api/scanner/config', (req, res) => {
@@ -175,7 +169,7 @@ app.post('/api/scanner/scan-asset', async (req, res) => {
 app.post('/api/reconnect', async (req, res) => {
   try {
     binanceSocket.connect();
-    res.json({ message: 'Reconnecting Binance socket...', status: binanceSocket.getAggregateStatus() });
+    res.json({ message: 'Reconnecting market data feed...', status: binanceSocket.getAggregateStatus() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
