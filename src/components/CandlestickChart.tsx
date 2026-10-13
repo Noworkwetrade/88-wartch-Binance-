@@ -519,21 +519,43 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         body: JSON.stringify({ symbol, timeframe })
       });
       const data = await res.json();
-      if (data && data.result) {
-        if (data.result.signal) {
-          setScannedSignal(data.result.signal);
-        } else {
-          setScannedSignal(null);
-        }
-        setScanEvaluation(data.result);
+      const directSignal = data && data.direction ? {
+        id: `scan-${data.symbol}-${data.timeframe}-${data.timestamp}`,
+        asset: data.symbol,
+        timeframe: data.timeframe,
+        direction: data.direction,
+        setupType: data.direction === 'UP' ? 'Long Setup' : 'Short Setup',
+        entryPrice: data.entry,
+        signalPrice: data.entry,
+        stopLoss: data.stopLoss,
+        takeProfit1: data.takeProfit1,
+        takeProfit2: data.takeProfit2,
+        rewardRiskRatio: data.rewardRisk,
+        confidence: data.confidence,
+        timestamp: data.timestamp,
+        status: data.status || 'ACTIVE'
+      } : null;
+
+      const evalData = data && data.result ? data.result : {
+        asset: data?.symbol || symbol,
+        timeframe: data?.timeframe || timeframe,
+        hasSetup: Boolean(directSignal),
+        action: directSignal ? (directSignal.direction === 'UP' ? 'BUY' : 'SELL') : 'NO SETUP',
+        signal: directSignal
+      };
+
+      if (directSignal || (data && data.result)) {
+        const activeSig = directSignal || data.result?.signal || null;
+        setScannedSignal(activeSig);
+        setScanEvaluation(evalData);
         setIsScanModalOpen(true);
-        if (data.result.hasSetup && data.result.signal) {
-          setScanFeedback(`Setup identified on ${symbol}: ${data.result.signal.direction === 'UP' ? 'BUY' : 'SELL'}`);
+        if (activeSig) {
+          setScanFeedback(`Setup identified on ${symbol}: ${activeSig.direction === 'UP' ? 'BUY' : 'SELL'}`);
         } else {
-          setScanFeedback(`no valid setup found`);
+          setScanFeedback('no valid setup found');
         }
       } else {
-        setScanFeedback(`no valid setup found`);
+        setScanFeedback('no valid setup found');
       }
     } catch (err: any) {
       setScanFeedback(`no valid setup found`);

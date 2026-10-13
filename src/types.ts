@@ -187,6 +187,9 @@ export interface ScannerSignalItem {
   // Performance Engine Fields
   status: SignalStatus;
   statusReason?: string;
+  outcome?: 'win' | 'loss';
+  settledAtLevel?: 'tp1' | 'tp2' | 'sl';
+  realizedR?: number;
   completedAt?: number;
   exitPrice?: number;
   pnlPercent?: number;

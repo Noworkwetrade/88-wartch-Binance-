@@ -533,7 +533,7 @@ export function runChartScan(
     signal = 'NO SETUP';
     setupQuality = 'NONE';
     keyPriceArea = `Current: $${currentPrice.toFixed(2)}`;
-    reason = `Market Structure: ${qualityResult.rejectionReason}`;
+    reason = `Market Structure Quality Filter: ${qualityResult.rejectionReason}`;
     invalidationLevel = currentPrice;
   }
   // ----------------------------------------------------

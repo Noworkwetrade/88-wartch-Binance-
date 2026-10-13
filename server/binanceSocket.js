@@ -10,6 +10,7 @@
  */
 
 import WebSocket from 'ws';
+import { EventEmitter } from 'node:events';
 import { marketCache } from './marketCache.js';
 import { isPermanentlyExcludedSymbol } from './binanceRest.js';
 
@@ -22,11 +23,21 @@ const ROTATION_INTERVAL_MS = 23 * 60 * 60 * 1000; // 23 hours (proactive rotatio
 const WATCHDOG_CHECK_MS = 10000;
 const WATCHDOG_TIMEOUT_MS = 25000;
 
-class BinanceSocketManager {
-  constructor() {
+class BinanceSocketManager extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.urls = options.urls || BINANCE_WS_URLS;
+    this.watchdogCheckMs = options.watchdogCheckMs || WATCHDOG_CHECK_MS;
+    this.watchdogTimeoutMs = options.watchdogTimeoutMs || WATCHDOG_TIMEOUT_MS;
+    this.rotationIntervalMs = options.rotationIntervalMs || ROTATION_INTERVAL_MS;
+    this.reconnectBaseDelayMs = options.reconnectBaseDelayMs || 1000;
+    this.reconnectMaxDelayMs = options.reconnectMaxDelayMs || 10000;
+    this.createSocket = options.createSocket || null;
+
     this.ws = null;
     this.status = 'disconnected'; // 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
     this.currentUrlIndex = 0;
+    this.lastConnectedUrl = null;
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
     this.watchdogTimer = null;
@@ -72,14 +83,19 @@ class BinanceSocketManager {
       return;
     }
 
-    const wsUrl = BINANCE_WS_URLS[this.currentUrlIndex % BINANCE_WS_URLS.length];
+    const wsUrl = this.urls[this.currentUrlIndex % this.urls.length];
+    this.lastConnectedUrl = wsUrl;
     this.notifyStatus(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
     console.log(`[binanceSocket] Connecting to Binance WebSocket: ${wsUrl}...`);
 
     try {
-      this.ws = new WebSocket(wsUrl, {
-        handshakeTimeout: 10000
-      });
+      if (typeof this.createSocket === 'function') {
+        this.ws = this.createSocket(wsUrl);
+      } else {
+        this.ws = new WebSocket(wsUrl, {
+          handshakeTimeout: 10000
+        });
+      }
 
       this.ws.on('open', () => this.handleOpen());
       this.ws.on('message', (data) => this.handleMessage(data));
@@ -106,12 +122,12 @@ class BinanceSocketManager {
     this.reconnectAttempts = 0;
     this.notifyStatus('connected');
 
-    // Schedule 23-hour connection rotation to respect Binance 24h lifetime
+    // Schedule connection rotation to respect Binance 24h lifetime
     if (this.rotationTimer) clearTimeout(this.rotationTimer);
     this.rotationTimer = setTimeout(() => {
       console.log('[binanceSocket] Rotating connection before 24-hour Binance lifetime limit...');
       this.rotateConnection();
-    }, ROTATION_INTERVAL_MS);
+    }, this.rotationIntervalMs);
   }
 
   handleMessage(raw) {
@@ -123,11 +139,13 @@ class BinanceSocketManager {
         // Array of 24hr tickers: [{ e: '24hrTicker', E: 167..., s: 'BTCUSDT', c: '...', ... }]
         for (const item of data) {
           if (!item || !item.s) continue;
+          // Venue-agnostic data feed: USDC and USD pairs remain in data layer for multi-quote tracking, while scanner evaluates USDT-only.
           const isAllowedQuote = item.s.endsWith('USDT') || item.s.endsWith('USDC') || item.s.endsWith('USD');
           if (!isAllowedQuote || isPermanentlyExcludedSymbol(item.s)) continue;
 
           const updated = marketCache.updateFromWs(item.s, item, item.E || Date.now());
           if (updated) {
+            this.emit('price', updated);
             for (const cb of this.onTickerCallbacks) {
               try {
                 cb(updated);
@@ -163,6 +181,11 @@ class BinanceSocketManager {
 
   handleClose(code, reason) {
     console.warn(`[binanceSocket] Closed (code: ${code}, reason: ${reason || 'none'}).`);
+    if (this.ws) {
+      try {
+        this.ws.removeAllListeners?.();
+      } catch (e) {}
+    }
     this.ws = null;
     this.notifyStatus('reconnecting');
     this.scheduleReconnect();
@@ -172,6 +195,7 @@ class BinanceSocketManager {
     console.log('[binanceSocket] Performing scheduled connection rotation...');
     if (this.ws) {
       try {
+        this.ws.removeAllListeners?.();
         this.ws.close(1000, 'Scheduled 23h rotation');
       } catch (e) {}
       this.ws = null;
@@ -184,8 +208,8 @@ class BinanceSocketManager {
 
     this.reconnectAttempts++;
     this.currentUrlIndex++;
-    // Exponential backoff: 1s, 2s, 4s, 8s, capped at 10s
-    const delay = Math.min(10000, Math.pow(2, this.reconnectAttempts - 1) * 1000);
+    // Exponential backoff
+    const delay = Math.min(this.reconnectMaxDelayMs, Math.pow(2, this.reconnectAttempts - 1) * this.reconnectBaseDelayMs);
     console.log(`[binanceSocket] Scheduling reconnect attempt #${this.reconnectAttempts} in ${delay}ms...`);
 
     this.reconnectTimer = setTimeout(() => {
@@ -201,19 +225,63 @@ class BinanceSocketManager {
       if (this.isDestroyed) return;
 
       const now = Date.now();
-      // If connected but no message received for > WATCHDOG_TIMEOUT_MS, reconnect
-      if (this.status === 'connected' && this.lastMessageTime > 0 && now - this.lastMessageTime > WATCHDOG_TIMEOUT_MS) {
+      // If connected but no message received for > watchdogTimeoutMs, reconnect
+      if (this.status === 'connected' && this.lastMessageTime > 0 && now - this.lastMessageTime > this.watchdogTimeoutMs) {
         console.warn(`[binanceSocket] Watchdog: silent connection detected (${now - this.lastMessageTime}ms). Reconnecting...`);
-        if (this.ws) {
+        const oldWs = this.ws;
+        this.ws = null;
+        if (oldWs) {
           try {
-            this.ws.terminate();
+            oldWs.removeAllListeners?.();
+            oldWs.terminate?.();
           } catch (e) {}
-          this.ws = null;
         }
         this.notifyStatus('reconnecting');
         this.scheduleReconnect();
       }
-    }, WATCHDOG_CHECK_MS);
+    }, this.watchdogCheckMs);
+  }
+
+  // =========================================================================
+  // Minimal test hooks (guarded so they have no production effect)
+  // =========================================================================
+
+  /**
+   * Test hook: simulates receiving a raw message from the WebSocket
+   */
+  _simulateMessage(msg) {
+    const raw = typeof msg === 'string' ? Buffer.from(msg) : Buffer.from(JSON.stringify(msg));
+    this.handleMessage(raw);
+  }
+
+  /**
+   * Test hook: simulates connection silence (socket stays open, no messages arrive)
+   */
+  _simulateSilence() {
+    this.lastMessageTime = Date.now() - (this.watchdogTimeoutMs + 2000);
+  }
+
+  /**
+   * Test hook: simulates abrupt socket drop
+   */
+  _simulateDrop(code = 1006, reason = 'Simulated connection drop') {
+    if (this.ws) {
+      try {
+        if (typeof this.ws.terminate === 'function') {
+          this.ws.terminate();
+        } else if (typeof this.ws.close === 'function') {
+          this.ws.close(code, reason);
+        }
+      } catch (e) {}
+    }
+    this.handleClose(code, reason);
+  }
+
+  /**
+   * Test hook: forces connection rotation path
+   */
+  _simulateRotation() {
+    this.rotateConnection();
   }
 
   getAggregateStatus() {
@@ -237,6 +305,7 @@ class BinanceSocketManager {
     if (this.rotationTimer) clearTimeout(this.rotationTimer);
     if (this.ws) {
       try {
+        this.ws.removeAllListeners?.();
         this.ws.close();
       } catch (e) {}
       this.ws = null;
@@ -244,5 +313,6 @@ class BinanceSocketManager {
   }
 }
 
+export { BinanceSocketManager };
 export const binanceSocket = new BinanceSocketManager();
 export default binanceSocket;

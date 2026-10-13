@@ -30,11 +30,15 @@
 import { fetchKlines, normalizeSymbol } from './binanceRest.js';
 import { marketCache } from './marketCache.js';
 import { symbolManager } from './symbolManager.js';
+import { SignalTouchEngine } from './signalTouchEngine.js';
 import {
   detectMarketRegime,
   validateSetupWithStructureIntelligence,
   createInverseSignal,
-  calculateWalkForwardValidation
+  calculateWalkForwardValidation,
+  detectMarketStructure,
+  detectCHoCH,
+  detectFakeout
 } from './structureIntelligence.js';
 import { calculateMarketStructureLevels } from './marketStructureLevels.js';
 import {
@@ -248,6 +252,9 @@ class ScannerService {
     // In-Memory Performance History: Map of id -> ScannerSignalItem
     this.performanceSignals = new Map();
 
+    // Authoritative Touch & Settlement Engine
+    this.touchEngine = new SignalTouchEngine();
+
     // In-Memory Quality Diagnostics Map: Key = `${symbol}-${timeframe}` -> MarketStructureQualityResult
     this.qualityDiagnostics = new Map();
   }
@@ -392,7 +399,11 @@ class ScannerService {
 
     if (direction === 'UP') {
       if (stopLoss === undefined || stopLoss >= entryPrice) {
-        stopLoss = invalidationLevel && invalidationLevel < entryPrice ? invalidationLevel : entryPrice * 0.985;
+        if (invalidationLevel && invalidationLevel < entryPrice) {
+          stopLoss = invalidationLevel;
+        } else {
+          return null; // Reject bad setup: do not force an artificial stop loss
+        }
       }
       const risk = entryPrice - stopLoss;
       if (takeProfit1 === undefined) {
@@ -403,7 +414,11 @@ class ScannerService {
       }
     } else {
       if (stopLoss === undefined || stopLoss <= entryPrice) {
-        stopLoss = invalidationLevel && invalidationLevel > entryPrice ? invalidationLevel : entryPrice * 1.015;
+        if (invalidationLevel && invalidationLevel > entryPrice) {
+          stopLoss = invalidationLevel;
+        } else {
+          return null; // Reject bad setup: do not force an artificial stop loss
+        }
       }
       const risk = stopLoss - entryPrice;
       if (takeProfit1 === undefined) {
@@ -421,7 +436,7 @@ class ScannerService {
     const confirmedTime = confirmedCandleCloseTime || timestamp;
     const id = `${symbol}-${timeframe}-${setupType.toLowerCase().replace(/[^a-z0-9]/g, '')}-${direction.toLowerCase()}-${confirmedTime}${typePrefix}`;
 
-    return {
+    const signalItem = {
       id,
       asset: symbol,
       timeframe,
@@ -457,8 +472,17 @@ class ScannerService {
       aiValidation,
       signalConditions,
       marketStructureQuality,
-      htfConfirmation
+      htfConfirmation,
+      isStopLossFrozen: true
     };
+
+    // Requirement 5: Freeze stop loss and core trade risk levels upon signal generation
+    // so subsequent candles cannot silently move it and alter original trade risk
+    Object.defineProperty(signalItem, 'stopLoss', { value: stopLoss, writable: false, configurable: false, enumerable: true });
+    Object.defineProperty(signalItem, 'entryPrice', { value: entryPrice, writable: false, configurable: false, enumerable: true });
+    Object.defineProperty(signalItem, 'invalidationLevel', { value: stopLoss, writable: false, configurable: false, enumerable: true });
+
+    return signalItem;
   }
 
   /**
@@ -487,199 +511,71 @@ class ScannerService {
       signal.highestReached = Math.max(signal.highestReached || currentPrice, currentPrice);
       signal.lowestReached = Math.min(signal.lowestReached || currentPrice, currentPrice);
 
-      const isUp = signal.direction === 'UP';
-      const tp1 = signal.takeProfit1 || signal.takeProfit;
-      const risk = Math.abs(signal.entryPrice - signal.stopLoss);
-      const tp2 = signal.takeProfit2 || (isUp ? signal.entryPrice + risk * 2.5 : signal.entryPrice - risk * 2.5);
-      const sl = signal.stopLoss;
-      const rrStr = (signal.rewardRiskRatio || 1.50).toFixed(2);
+      // Ensure signal is registered in touch engine
+      if (!this.touchEngine.signals.has(signal.id)) {
+        this.touchEngine.registerSignal(signal);
+      }
 
-      if (isUp) {
-        if (signal.tp1Hit) {
-          // TP1 already hit: monitoring for TP2 or reversal
-          const tp2Reached = currentPrice >= tp2;
-          const slReached = currentPrice <= sl;
+      // Delegate settlement directly to authoritative SignalTouchEngine
+      const evaluated = this.touchEngine.evaluateTick(signal.id, currentPrice, now);
+      if (evaluated) {
+        signal.outcome = evaluated.outcome;
+        signal.settledAtLevel = evaluated.settledAtLevel;
+        signal.realizedR = evaluated.realizedR;
+        signal.tp1Hit = evaluated.tp1Hit;
+        signal.tp2Hit = evaluated.tp2Hit;
 
-          if (tp2Reached) {
-            signal.tp2Hit = true;
-            signal.tp2HitTimestamp = now;
-            signal.tp2Price = tp2;
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = 'tp #2 hit | trade complete';
-            signal.statusReason = 'tp #2 hit | trade complete';
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = tp2;
-            signal.pnlPercent = Math.abs(((tp2 - signal.entryPrice) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (slReached) {
-            // Reversal after TP1 secured: permanently remains a WIN!
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
-            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win (reversal to SL)`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = sl;
-            hasChanges = true;
-          }
-        } else {
-          // TP1 has not yet been hit
-          const tp2Reached = currentPrice >= tp2;
-          const tp1Reached = currentPrice >= tp1;
-          const slReached = currentPrice <= sl;
+        if (evaluated.isTradeComplete) {
+          signal.isTradeComplete = true;
+          signal.status = evaluated.outcome === 'win' ? 'WIN' : 'LOSS';
+          signal.completedAt = evaluated.completedAt || now;
+          signal.durationMs = now - (signal.timestamp || now);
 
-          if (tp1Reached && slReached) {
-            signal.status = 'LOSS';
-            signal.isTradeComplete = true;
-            signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = sl;
-            signal.pnlPercent = -Math.abs(((signal.entryPrice - sl) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (tp2Reached) {
-            signal.tp1Hit = true;
-            signal.tp1HitTimestamp = now;
-            signal.tp1Price = tp1;
-            signal.tp2Hit = true;
-            signal.tp2HitTimestamp = now;
-            signal.tp2Price = tp2;
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = 'tp #2 hit | trade complete';
-            signal.statusReason = 'tp #2 hit | trade complete';
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = tp2;
-            signal.pnlPercent = Math.abs(((tp2 - signal.entryPrice) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (tp1Reached) {
-            signal.tp1Hit = true;
-            signal.tp1HitTimestamp = now;
-            signal.tp1Price = tp1;
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = `tp hit | r:r ${rrStr} | win`;
-            signal.statusReason = `tp hit | r:r ${rrStr} | win`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = tp1;
-            signal.pnlPercent = Math.abs(((tp1 - signal.entryPrice) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (slReached) {
-            signal.status = 'LOSS';
-            signal.isTradeComplete = true;
-            signal.statusReason = `Stop loss level ($${sl.toFixed(4)}) reached.`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = sl;
-            signal.pnlPercent = -Math.abs(((signal.entryPrice - sl) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (now >= signal.expiryTimestamp) {
-            signal.status = 'EXPIRED';
-            signal.isTradeComplete = true;
-            signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = currentPrice;
-            signal.pnlPercent = ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100;
-            hasChanges = true;
-          }
+          const exitLevel = evaluated.settledAtLevel;
+          signal.exitPrice = exitLevel === 'tp2' ? (signal.takeProfit2 || signal.takeProfit1)
+            : exitLevel === 'tp1' ? (signal.takeProfit1 || signal.takeProfit)
+            : signal.stopLoss;
+
+          const isUp = signal.direction === 'UP' || signal.direction === 'LONG';
+          signal.pnlPercent = isUp
+            ? ((signal.exitPrice - signal.entryPrice) / signal.entryPrice) * 100
+            : ((signal.entryPrice - signal.exitPrice) / signal.entryPrice) * 100;
+
+          const rrStr = (signal.rewardRiskRatio || 1.50).toFixed(2);
+          signal.displayMessage = evaluated.outcome === 'win'
+            ? (exitLevel === 'tp2' ? 'tp #2 hit | trade complete' : `tp #1 hit | r:r ${rrStr} | win`)
+            : `Stop loss level ($${signal.stopLoss}) reached.`;
+          signal.statusReason = signal.displayMessage;
+
+          this.syncSiblingsOnCompletion(signal);
+          hasChanges = true;
+        } else if (evaluated.tp1Hit && !signal.tp1HitRecorded) {
+          signal.tp1HitRecorded = true;
+          signal.tp1HitTimestamp = now;
+          signal.status = 'WIN';
+          signal.tp1Price = signal.takeProfit1 || signal.takeProfit;
+          signal.displayMessage = `tp hit | r:r ${(signal.rewardRiskRatio || 1.50).toFixed(2)} | win`;
+          signal.statusReason = signal.displayMessage;
+          hasChanges = true;
         }
-      } else {
-        // DOWN Direction
-        if (signal.tp1Hit) {
-          const tp2Reached = currentPrice <= tp2;
-          const slReached = currentPrice >= sl;
+      }
 
-          if (tp2Reached) {
-            signal.tp2Hit = true;
-            signal.tp2HitTimestamp = now;
-            signal.tp2Price = tp2;
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = 'tp #2 hit | trade complete';
-            signal.statusReason = 'tp #2 hit | trade complete';
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = tp2;
-            signal.pnlPercent = Math.abs(((signal.entryPrice - tp2) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (slReached) {
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = `tp #1 hit | r:r ${rrStr} | win`;
-            signal.statusReason = `tp #1 hit | r:r ${rrStr} | win (reversal to SL)`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = sl;
-            hasChanges = true;
-          }
-        } else {
-          const tp2Reached = currentPrice <= tp2;
-          const tp1Reached = currentPrice <= tp1;
-          const slReached = currentPrice >= sl;
-
-          if (tp1Reached && slReached) {
-            signal.status = 'LOSS';
-            signal.isTradeComplete = true;
-            signal.statusReason = `Conservative SL: Both TP and SL were breached in same period.`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = sl;
-            signal.pnlPercent = -Math.abs(((sl - signal.entryPrice) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (tp2Reached) {
-            signal.tp1Hit = true;
-            signal.tp1HitTimestamp = now;
-            signal.tp1Price = tp1;
-            signal.tp2Hit = true;
-            signal.tp2HitTimestamp = now;
-            signal.tp2Price = tp2;
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = 'tp #2 hit | trade complete';
-            signal.statusReason = 'tp #2 hit | trade complete';
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = tp2;
-            signal.pnlPercent = Math.abs(((signal.entryPrice - tp2) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (tp1Reached) {
-            signal.tp1Hit = true;
-            signal.tp1HitTimestamp = now;
-            signal.tp1Price = tp1;
-            signal.isTradeComplete = true;
-            signal.status = 'WIN';
-            signal.displayMessage = `tp hit | r:r ${rrStr} | win`;
-            signal.statusReason = `tp hit | r:r ${rrStr} | win`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = tp1;
-            signal.pnlPercent = Math.abs(((signal.entryPrice - tp1) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (slReached) {
-            signal.status = 'LOSS';
-            signal.isTradeComplete = true;
-            signal.statusReason = `Stop loss level ($${sl.toFixed(4)}) reached.`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = sl;
-            signal.pnlPercent = -Math.abs(((sl - signal.entryPrice) / signal.entryPrice) * 100);
-            hasChanges = true;
-          } else if (now >= signal.expiryTimestamp) {
-            signal.status = 'EXPIRED';
-            signal.isTradeComplete = true;
-            signal.statusReason = `Expired after ${signal.expiryCandles} candle periods without reaching TP or SL.`;
-            signal.completedAt = now;
-            signal.durationMs = now - signal.timestamp;
-            signal.exitPrice = currentPrice;
-            signal.pnlPercent = ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
-            hasChanges = true;
-          }
-        }
+      // Handle candle expiration if uncompleted (candle duration expiry cannot be expressed purely through touch levels)
+      if (!signal.isTradeComplete && signal.expiryTimestamp && now >= signal.expiryTimestamp) {
+        signal.status = 'EXPIRED';
+        signal.outcome = 'expired';
+        signal.isTradeComplete = true;
+        signal.statusReason = `Expired after ${signal.expiryCandles || 4} candle periods without reaching TP or SL.`;
+        signal.completedAt = now;
+        signal.durationMs = now - (signal.timestamp || now);
+        signal.exitPrice = currentPrice;
+        const isUp = signal.direction === 'UP' || signal.direction === 'LONG';
+        signal.pnlPercent = isUp
+          ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
+          : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+        this.touchEngine.clearedIds.add(signal.id);
+        this.syncSiblingsOnCompletion(signal);
+        hasChanges = true;
       }
     }
 
@@ -719,13 +615,10 @@ class ScannerService {
         }
       }
 
-      const allLoaded = symbolManager.symbolNames && symbolManager.symbolNames.length > 0
-        ? symbolManager.symbolNames
-        : marketCache.getAllTickers().map((t) => t.symbol);
-
-      const eligibleList = allLoaded.filter(
-        (s) => s && s.endsWith('USDT') && !isPermanentlyExcludedSymbol(s)
-      );
+      // Enforce USDT-only boundary: scanner strictly calls scannerSymbols(), never allDataSymbols()
+      const eligibleList = symbolManager.scannerSymbols().length > 0
+        ? symbolManager.scannerSymbols()
+        : marketCache.getAllTickers().map((t) => t.symbol).filter((s) => s && s.endsWith('USDT') && !isPermanentlyExcludedSymbol(s));
 
       const totalEligible = eligibleList.length || 1;
       const batchSize = this.batchSize || 25;
@@ -922,6 +815,33 @@ class ScannerService {
 
   registerSignalSafely(signal) {
     if (!signal || !signal.id) return;
+    if (this.touchEngine.clearedIds.has(signal.id)) return;
+
+    // B.3 Directional Conflict Guard (HARD REJECT) in signal registration path
+    // Rules:
+    // - Never call a sale signal in an uptrend unless it's Engulfing or Evening Star at key resistance
+    // - Do not call a buy signal in a downtrend unless it's a reversal pattern such as Morning Star or Engulfing at key support
+    const regime = signal.marketRegime || signal.regimeData?.regime;
+    if (signal.direction === 'DOWN') {
+      const isAllowedReversalShort = (
+        (signal.setupType === 'Engulfing Confirmation' || signal.setupType === 'Evening Star Reversal') &&
+        signal.isAtKeyResistance
+      );
+      if ((regime === 'trending_up' || signal.hasRecentBullishChoch) && !isAllowedReversalShort) {
+        console.warn(`[scannerService] Directional Conflict Guard (HARD REJECT): Blocked registering SHORT signal on ${signal.asset} under bullish regime / CHoCH.`);
+        return;
+      }
+    } else if (signal.direction === 'UP') {
+      const isAllowedReversalLong = (
+        (signal.setupType === 'Morning Star Reversal' || signal.setupType === 'Engulfing Confirmation') &&
+        signal.isAtKeySupport
+      );
+      if ((regime === 'trending_down' || signal.hasRecentBearishChoch) && !isAllowedReversalLong) {
+        console.warn(`[scannerService] Directional Conflict Guard (HARD REJECT): Blocked registering LONG signal on ${signal.asset} under bearish regime / CHoCH.`);
+        return;
+      }
+    }
+
     const existing = this.performanceSignals.get(signal.id);
     if (!existing) {
       // Prevent duplicate or stale signals from the same closed candle across identical asset/timeframe
@@ -932,8 +852,77 @@ class ScannerService {
       );
       if (!hasExistingCandle) {
         this.performanceSignals.set(signal.id, signal);
+        this.touchEngine.registerSignal(signal);
       }
     }
+  }
+
+  syncSiblingsOnCompletion(settledSignal) {
+    if (!settledSignal) return;
+    for (const [siblingId, sibling] of this.performanceSignals.entries()) {
+      if (
+        siblingId !== settledSignal.id &&
+        sibling.asset === settledSignal.asset &&
+        sibling.timeframe === settledSignal.timeframe &&
+        (sibling.confirmedCandleCloseTime === settledSignal.confirmedCandleCloseTime ||
+         sibling.timestamp === settledSignal.timestamp)
+      ) {
+        sibling.isTradeComplete = true;
+        sibling.status = settledSignal.status;
+        sibling.outcome = settledSignal.outcome;
+        sibling.settledAtLevel = settledSignal.settledAtLevel;
+        sibling.realizedR = settledSignal.realizedR;
+        sibling.completedAt = settledSignal.completedAt;
+        sibling.exitPrice = settledSignal.exitPrice;
+        sibling.pnlPercent = settledSignal.pnlPercent;
+        sibling.displayMessage = settledSignal.displayMessage;
+        sibling.statusReason = settledSignal.statusReason;
+        this.touchEngine.clearedIds.add(siblingId);
+      }
+    }
+  }
+
+  evaluateCandle(signalId, candle) {
+    if (!this.touchEngine.signals.has(signalId)) {
+      const sig = this.performanceSignals.get(signalId);
+      if (sig) this.touchEngine.registerSignal(sig);
+    }
+    const evaluated = this.touchEngine.evaluateCandle(signalId, candle);
+    if (evaluated) {
+      const signal = this.performanceSignals.get(signalId);
+      if (signal) {
+        signal.outcome = evaluated.outcome;
+        signal.settledAtLevel = evaluated.settledAtLevel;
+        signal.realizedR = evaluated.realizedR;
+        signal.tp1Hit = evaluated.tp1Hit;
+        signal.tp2Hit = evaluated.tp2Hit;
+        if (evaluated.isTradeComplete) {
+          signal.isTradeComplete = true;
+          signal.status = evaluated.outcome === 'win' ? 'WIN' : 'LOSS';
+          signal.completedAt = evaluated.completedAt || candle.openTime || Date.now();
+          signal.durationMs = signal.completedAt - (signal.timestamp || signal.completedAt);
+          const exitLevel = evaluated.settledAtLevel;
+          signal.exitPrice = exitLevel === 'tp2' ? (signal.takeProfit2 || signal.takeProfit1)
+            : exitLevel === 'tp1' ? (signal.takeProfit1 || signal.takeProfit)
+            : signal.stopLoss;
+          const isUp = signal.direction === 'UP' || signal.direction === 'LONG';
+          signal.pnlPercent = isUp
+            ? ((signal.exitPrice - signal.entryPrice) / signal.entryPrice) * 100
+            : ((signal.entryPrice - signal.exitPrice) / signal.entryPrice) * 100;
+          const rrStr = (signal.rewardRiskRatio || 1.50).toFixed(2);
+          signal.displayMessage = evaluated.outcome === 'win'
+            ? (exitLevel === 'tp2' ? 'tp #2 hit | trade complete' : `tp #1 hit | r:r ${rrStr} | win`)
+            : `Stop loss level ($${signal.stopLoss}) reached.`;
+          signal.statusReason = signal.displayMessage;
+          this.syncSiblingsOnCompletion(signal);
+        }
+      }
+    }
+    return evaluated;
+  }
+
+  getClearedIds() {
+    return this.touchEngine.getClearedIds();
   }
 
   sanitizeSignalForPublic(s) {
@@ -979,7 +968,16 @@ class ScannerService {
         timeframe,
         hasSetup: false,
         action: 'NO SETUP',
-        message: 'no valid setup found'
+        message: 'no valid setup found',
+        signal: null,
+        originalSignal: null,
+        qualityResult: {
+          isTradable: false,
+          isPermanentlyExcluded: true,
+          score: 0,
+          grade: 'untradable',
+          reason: 'Permanently excluded symbol'
+        }
       };
     }
 
@@ -991,7 +989,19 @@ class ScannerService {
           timeframe,
           hasSetup: false,
           action: 'NO SETUP',
-          message: 'no valid setup found'
+          message: 'no valid setup found',
+          signal: null,
+          evaluation: {
+            asset: symbol,
+            timeframe,
+            hasSetup: false,
+            action: 'NO SETUP',
+            actionLabel: 'NO VALID SETUP FOUND',
+            exactReason: 'Break & Retest: none. Strong Breakout (BOS): none. Fakeout Rejection: none. Engulfing Confirmation: none.',
+            formingSetup: { detected: false, status: 'NONE', ruleNote: 'forming setup does not equal a signal' },
+            confirmedSetup: { isConfirmed: false, direction: null },
+            marketStructure: { swingHigh: 0, swingLow: 0, support: 0, resistance: 0 }
+          }
         };
       }
 
@@ -1011,7 +1021,19 @@ class ScannerService {
           timeframe,
           hasSetup: false,
           action: 'NO SETUP',
-          message: 'no valid setup found'
+          message: 'no valid setup found',
+          signal: null,
+          evaluation: {
+            asset: symbol,
+            timeframe,
+            hasSetup: false,
+            action: 'NO SETUP',
+            actionLabel: 'NO VALID SETUP FOUND',
+            exactReason: 'Break & Retest: none. Strong Breakout (BOS): none. Fakeout Rejection: none. Engulfing Confirmation: none.',
+            formingSetup: { detected: false, status: 'NONE', ruleNote: 'forming setup does not equal a signal' },
+            confirmedSetup: { isConfirmed: false, direction: null },
+            marketStructure: { swingHigh: 0, swingLow: 0, support: 0, resistance: 0 }
+          }
         };
       }
 
@@ -1145,31 +1167,55 @@ class ScannerService {
         ? Math.min(...validResistances)
         : Math.max(...closedCandles.slice(-25).map((c) => c.high));
 
+      const evalObj = {
+        asset: symbol,
+        timeframe,
+        currentPrice,
+        hasSetup: Boolean(confirmedSignal),
+        action: confirmedSignal ? (confirmedSignal.direction === 'UP' ? 'BUY' : 'SELL') : 'NO SETUP',
+        actionLabel: confirmedSignal ? `${confirmedSignal.direction === 'UP' ? 'BUY' : 'SELL'} SETUP IDENTIFIED` : 'NO VALID SETUP FOUND',
+        exactReason: confirmedSignal ? confirmedSignal.reason : 'Break & Retest: none. Strong Breakout (BOS): none. Fakeout Rejection: none. Engulfing Confirmation: none.',
+        marketStructure: {
+          swingHigh: confirmedSwingHigh,
+          swingLow: confirmedSwingLow,
+          support: structuralSupport,
+          resistance: structuralResistance
+        },
+        formingSetup: { detected: false, status: 'UNCONFIRMED FORMING SETUP', ruleNote: 'forming setup does not equal a signal' },
+        confirmedSetup: { isConfirmed: Boolean(confirmedSignal), direction: confirmedSignal?.direction || null },
+        tradeLevels: confirmedSignal ? {
+          entryPrice: confirmedSignal.entryPrice,
+          stopLoss: confirmedSignal.stopLoss,
+          takeProfit1: confirmedSignal.takeProfit1,
+          takeProfit2: confirmedSignal.takeProfit2,
+          rewardRiskRatio: confirmedSignal.rewardRiskRatio
+        } : null
+      };
+
       if (confirmedSignal) {
         const sanitizedSignal = this.sanitizeSignalForPublic(confirmedSignal);
         return {
           asset: symbol,
           timeframe,
+          currentPrice,
           hasSetup: true,
           action: confirmedSignal.direction === 'UP' ? 'BUY' : 'SELL',
           direction: confirmedSignal.direction,
           signal: sanitizedSignal,
-          tradeLevels: {
-            entryPrice: confirmedSignal.entryPrice,
-            stopLoss: confirmedSignal.stopLoss,
-            takeProfit1: confirmedSignal.takeProfit1,
-            takeProfit2: confirmedSignal.takeProfit2,
-            rewardRiskRatio: confirmedSignal.rewardRiskRatio
-          }
+          evaluation: evalObj,
+          tradeLevels: evalObj.tradeLevels
         };
       }
 
       return {
         asset: symbol,
         timeframe,
+        currentPrice,
         hasSetup: false,
         action: 'NO SETUP',
-        message: 'no valid setup found'
+        message: 'no valid setup found',
+        signal: null,
+        evaluation: evalObj
       };
     } catch (err) {
       console.warn(`[scannerService] Error scanning single asset ${symbol}:`, err.message);
@@ -1178,7 +1224,19 @@ class ScannerService {
         timeframe,
         hasSetup: false,
         action: 'NO SETUP',
-        message: 'no valid setup found'
+        message: 'no valid setup found',
+        signal: null,
+        evaluation: {
+          asset: symbol,
+          timeframe,
+          hasSetup: false,
+          action: 'NO SETUP',
+          actionLabel: 'NO VALID SETUP FOUND',
+          exactReason: 'Break & Retest: none. Strong Breakout (BOS): none. Fakeout Rejection: none. Engulfing Confirmation: none.',
+          formingSetup: { detected: false, status: 'NONE', ruleNote: 'forming setup does not equal a signal' },
+          confirmedSetup: { isConfirmed: false, direction: null },
+          marketStructure: { swingHigh: 0, swingLow: 0, support: 0, resistance: 0 }
+        }
       };
     }
   }
@@ -1227,6 +1285,21 @@ class ScannerService {
     // Detect Market Regime from closed candle series
     const regimeData = detectMarketRegime(closedCandles);
 
+    // Detect structural breaks (BOS / CHoCH) for structural trend tracking
+    const marketStructureData = detectMarketStructure(closedCandles, 2);
+    const recentBreaks = marketStructureData.structureBreaks || [];
+    const lastBullishChoch = [...recentBreaks].reverse().find((b) => b.type === 'CHoCH' && b.direction === 'bullish');
+    const isBullishChochInLast5 = Boolean(lastBullishChoch && lastBullishChoch.breakIndex >= len - 5);
+    const hasBearishFlipAfterBullish = lastBullishChoch
+      ? recentBreaks.some((b) => (b.type === 'CHoCH' || b.type === 'BOS') && b.direction === 'bearish' && b.breakIndex > lastBullishChoch.breakIndex)
+      : false;
+
+    const lastBearishChoch = [...recentBreaks].reverse().find((b) => b.type === 'CHoCH' && b.direction === 'bearish');
+    const isBearishChochInLast5 = Boolean(lastBearishChoch && lastBearishChoch.breakIndex >= len - 5);
+    const hasBullishFlipAfterBearish = lastBearishChoch
+      ? recentBreaks.some((b) => (b.type === 'CHoCH' || b.type === 'BOS') && b.direction === 'bullish' && b.breakIndex > lastBearishChoch.breakIndex)
+      : false;
+
     // Volume comparison
     const volLookback = Math.min(20, len);
     let volSum = 0;
@@ -1263,8 +1336,14 @@ class ScannerService {
     const c0LowerWick = Math.min(c0.open, c0.close) - c0.low;
     const c0Body = Math.abs(c0.close - c0.open);
     const c0IsGreen = c0.close >= c0.open;
+    const c0BodyRatio = c0Body / c0Range;
 
-    const isDecisiveBody = c0Body / c0Range > 0.48;
+    const c1Body = Math.abs(c1.close - c1.open);
+    const c1IsGreen = c1.close >= c1.open;
+    const c2IsGreen = c2 ? c2.close >= c2.open : false;
+
+    const isDecisiveBody = c0BodyRatio > 0.48;
+    const isStrongContinuationBody = c0BodyRatio >= 0.60;
 
     let baseSignal = null;
     let pendingRetest = null;
@@ -1310,19 +1389,21 @@ class ScannerService {
 
     // =========================================================================
     // TIER 2: STRONG CONFIRMED BREAK (BOS) - RETEST OPTIONAL
+    // Symmetric rule: a strong bullish body breaking above structure with
+    // bullish CHoCH is evaluated as a LONG continuation setup, never a counter-trend short.
     // =========================================================================
     if (!baseSignal) {
       const isStrongBullishBreak =
-        c0.close > lastHigh &&
-        (c1.close <= lastHigh || c2.close <= lastHigh) &&
+        (c0.close > lastHigh || (isBullishChochInLast5 && c0.close >= lastHigh * 0.998)) &&
+        (c1.close <= lastHigh || c2.close <= lastHigh || isBullishChochInLast5) &&
         c0IsGreen &&
-        isDecisiveBody;
+        (isDecisiveBody || isStrongContinuationBody);
 
       const isStrongBearishBreak =
-        c0.close < lastLow &&
-        (c1.close >= lastLow || c2.close >= lastLow) &&
+        (c0.close < lastLow || (isBearishChochInLast5 && c0.close <= lastLow * 1.002)) &&
+        (c1.close >= lastLow || c2.close >= lastLow || isBearishChochInLast5) &&
         !c0IsGreen &&
-        isDecisiveBody;
+        (isDecisiveBody || isStrongContinuationBody);
 
       if (isStrongBullishBreak) {
         baseSignal = this.generateStructuralSignal({
@@ -1363,9 +1444,24 @@ class ScannerService {
 
     // =========================================================================
     // TIER 3: FAKEOUT REJECTION
+    // Body-to-range filter: if body >= 60% of total range AND close is in the breakout
+    // direction, it is NOT a fakeout — it is a confirmed breakout!
     // =========================================================================
     if (!baseSignal) {
-      if (c0.high > lastHigh && c0.close < lastHigh && (c0UpperWick / c0Range) > 0.45 && !c0IsGreen) {
+      const isBullishBreakoutProfile = isStrongContinuationBody && c0IsGreen;
+      const isBearishBreakdownProfile = isStrongContinuationBody && !c0IsGreen;
+
+      const isGenuineHighFakeout = !isBullishBreakoutProfile && (
+        detectFakeout(c0, lastHigh, 'high') ||
+        (c0.high > lastHigh && c0.close < lastHigh && (c0UpperWick / c0Range) > 0.45 && !c0IsGreen)
+      );
+
+      const isGenuineLowFakeout = !isBearishBreakdownProfile && (
+        detectFakeout(c0, lastLow, 'low') ||
+        (c0.low < lastLow && c0.close > lastLow && (c0LowerWick / c0Range) > 0.45 && c0IsGreen)
+      );
+
+      if (isGenuineHighFakeout) {
         baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
@@ -1382,7 +1478,7 @@ class ScannerService {
           marketStructureQuality: qualityResult,
           htfConfirmation
         });
-      } else if (c0.low < lastLow && c0.close > lastLow && (c0LowerWick / c0Range) > 0.45 && c0IsGreen) {
+      } else if (isGenuineLowFakeout) {
         baseSignal = this.generateStructuralSignal({
           symbol,
           timeframe,
@@ -1403,11 +1499,29 @@ class ScannerService {
     }
 
     // =========================================================================
-    // TIER 4: ENGULFING CONFIRMATION
+    // TIER 4: REVERSAL CONFIRMATION (ENGULFING, MORNING STAR, EVENING STAR)
     // =========================================================================
     if (!baseSignal) {
-      const isBullishEngulfing = c0IsGreen && !c1.isGreen && c0.close > c1.open && c0.open <= c1.close;
-      const isBearishEngulfing = !c0IsGreen && c1.isGreen && c0.close < c1.open && c0.open >= c1.close;
+      const isBullishEngulfing = c0IsGreen && !c1IsGreen && c0.close > c1.open && c0.open <= c1.close;
+      const isBearishEngulfing = !c0IsGreen && c1IsGreen && c0.close < c1.open && c0.open >= c1.close;
+
+      // Morning Star: 3-candle bottom reversal near key support zone
+      const isMorningStar = Boolean(
+        c2 && !c2IsGreen &&
+        c1Body <= c0Body * 0.5 &&
+        c0IsGreen &&
+        c0.close >= (c2.open + c2.close) / 2 &&
+        (Math.abs(c0.low - lastLow) / lastLow < 0.02 || Math.abs(c1.low - lastLow) / lastLow < 0.02)
+      );
+
+      // Evening Star: 3-candle top reversal near key resistance zone
+      const isEveningStar = Boolean(
+        c2 && c2IsGreen &&
+        c1Body <= c0Body * 0.5 &&
+        !c0IsGreen &&
+        c0.close <= (c2.open + c2.close) / 2 &&
+        (Math.abs(c0.high - lastHigh) / lastHigh < 0.02 || Math.abs(c1.high - lastHigh) / lastHigh < 0.02)
+      );
 
       if (isBullishEngulfing && Math.abs(c0.low - lastLow) / lastLow < 0.018) {
         baseSignal = this.generateStructuralSignal({
@@ -1443,6 +1557,75 @@ class ScannerService {
           marketStructureQuality: qualityResult,
           htfConfirmation
         });
+      } else if (isMorningStar) {
+        baseSignal = this.generateStructuralSignal({
+          symbol,
+          timeframe,
+          direction: 'UP',
+          setupType: 'Morning Star Reversal',
+          closePrice: c0.close,
+          confidence: 88,
+          reason: `Morning Star Reversal: 3-candle bottom reversal formed at key structural support $${lastLow.toFixed(2)} with indecision star and strong green recovery close.`,
+          timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
+          closedCandles,
+          fiveMinCandles,
+          regimeData,
+          marketStructureQuality: qualityResult,
+          htfConfirmation
+        });
+      } else if (isEveningStar) {
+        baseSignal = this.generateStructuralSignal({
+          symbol,
+          timeframe,
+          direction: 'DOWN',
+          setupType: 'Evening Star Reversal',
+          closePrice: c0.close,
+          confidence: 88,
+          reason: `Evening Star Reversal: 3-candle top reversal formed at key structural resistance $${lastHigh.toFixed(2)} with exhaustion star and decisive red breakdown close.`,
+          timestamp: c0.closeTime,
+          confirmedCandleCloseTime: c0.closeTime,
+          closedCandles,
+          fiveMinCandles,
+          regimeData,
+          marketStructureQuality: qualityResult,
+          htfConfirmation
+        });
+      }
+    }
+
+    // =========================================================================
+    // DIRECTIONAL CONFLICT GUARD (HARD REJECT)
+    // Rule:
+    // - In an uptrend (trending_up / bullish CHoCH): NEVER call a SELL signal UNLESS
+    //   it is a confirmed reversal: Bearish Engulfing or Evening Star at key resistance!
+    // - In a downtrend (trending_down / bearish CHoCH): Do NOT call a BUY signal UNLESS
+    //   it is a confirmed reversal: Morning Star or Bullish Engulfing at key support!
+    // =========================================================================
+    let directionalConflictReason = null;
+    if (baseSignal) {
+      if (baseSignal.direction === 'DOWN') {
+        const isTrendingUp = regimeData.regime === 'trending_up';
+        const isAllowedReversalShort = (
+          (baseSignal.setupType === 'Engulfing Confirmation' || baseSignal.setupType === 'Evening Star Reversal') &&
+          Math.abs(c0.high - lastHigh) / lastHigh <= 0.02
+        );
+        if ((isTrendingUp || isBullishChochInLast5) && !hasBearishFlipAfterBullish && !isAllowedReversalShort) {
+          directionalConflictReason = `Directional Conflict Guard (HARD REJECT): SHORT signal rejected because market regime is ${regimeData.regime}${isBullishChochInLast5 ? ' with active bullish CHoCH within last 5 candles' : ''} without confirmed bearish reversal (Engulfing or Evening Star at resistance).`;
+          console.warn(`[scannerService] ${directionalConflictReason}`);
+          baseSignal = null;
+        }
+      } else if (baseSignal.direction === 'UP') {
+        const isTrendingDown = regimeData.regime === 'trending_down';
+        const isAllowedReversalLong = (
+          (baseSignal.setupType === 'Morning Star Reversal' || baseSignal.setupType === 'Engulfing Confirmation') &&
+          Math.abs(c0.low - lastLow) / lastLow <= 0.02
+        );
+        if ((isTrendingDown || isBearishChochInLast5) && !hasBullishFlipAfterBearish && !isAllowedReversalLong) {
+          directionalConflictReason = `Directional Conflict Guard (HARD REJECT): LONG signal rejected because market regime is ${regimeData.regime}${isBearishChochInLast5 ? ' with active bearish CHoCH within last 5 candles' : ''} without confirmed bullish reversal (Morning Star or Engulfing at support).`;
+          console.warn(`[scannerService] ${directionalConflictReason}`);
+          baseSignal = null;
+        }
       }
     }
 
@@ -1530,7 +1713,41 @@ class ScannerService {
       }
     }
 
+    const activeSig = aiFilteredSignal || originalSignal || null;
+    const hasSetup = Boolean(activeSig);
+    const evaluation = {
+      asset: symbol,
+      timeframe,
+      currentPrice,
+      hasSetup,
+      action: hasSetup ? (activeSig.direction === 'UP' ? 'BUY' : 'SELL') : 'NO SETUP',
+      actionLabel: hasSetup ? `${activeSig.direction === 'UP' ? 'BUY' : 'SELL'} SETUP IDENTIFIED` : 'NO VALID SETUP FOUND',
+      exactReason: hasSetup ? activeSig.reason : (directionalConflictReason || 'Break & Retest: none. Strong Breakout (BOS): none. Fakeout Rejection: none. Engulfing Confirmation: none.'),
+      marketStructure: {
+        swingHigh: lastHigh,
+        swingLow: lastLow,
+        support: lastLow,
+        resistance: lastHigh
+      },
+      formingSetup: { detected: false, status: 'NONE', ruleNote: 'forming setup does not equal a signal' },
+      confirmedSetup: { isConfirmed: hasSetup, direction: activeSig?.direction || null },
+      tradeLevels: activeSig ? {
+        entryPrice: activeSig.entryPrice,
+        stopLoss: activeSig.stopLoss,
+        takeProfit1: activeSig.takeProfit1,
+        takeProfit2: activeSig.takeProfit2,
+        rewardRiskRatio: activeSig.rewardRiskRatio
+      } : null,
+      signal: activeSig
+    };
+
     return {
+      asset: symbol,
+      timeframe,
+      currentPrice,
+      hasSetup,
+      signal: activeSig,
+      evaluation,
       originalSignal,
       inverseSignal,
       aiFilteredSignal,
@@ -1770,4 +1987,5 @@ class ScannerService {
 }
 
 export const scannerService = new ScannerService();
+export { detectFakeout };
 export default scannerService;

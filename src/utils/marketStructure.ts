@@ -96,23 +96,7 @@ export function calculateMarketStructure(candles: Candle[], lookback = 2): Marke
   for (let i = 0; i < len; i++) {
     const candle = candles[i];
 
-    // Check if new swing points are confirmed at this index
-    const newPoint = swingPoints.find((p) => p.index === i);
-    if (newPoint) {
-      if (newPoint.isHigh) {
-        activeHigh = newPoint;
-        brokenHighIndex = -1; // reset break tracker for new high
-      } else {
-        activeLow = newPoint;
-        brokenLowIndex = -1; // reset break tracker for new low
-      }
-
-      // Update structural trend context
-      if (newPoint.type === 'HH') trend = 'bullish';
-      else if (newPoint.type === 'LL') trend = 'bearish';
-    }
-
-    // Check for upward break of active high
+    // Check for upward break of active high BEFORE updating activeHigh
     if (activeHigh && i > activeHigh.index && brokenHighIndex !== activeHigh.index) {
       if (candle.close > activeHigh.price) {
         // Break confirmed!
@@ -131,7 +115,7 @@ export function calculateMarketStructure(candles: Candle[], lookback = 2): Marke
       }
     }
 
-    // Check for downward break of active low
+    // Check for downward break of active low BEFORE updating activeLow
     if (activeLow && i > activeLow.index && brokenLowIndex !== activeLow.index) {
       if (candle.close < activeLow.price) {
         // Break confirmed!
@@ -148,6 +132,22 @@ export function calculateMarketStructure(candles: Candle[], lookback = 2): Marke
         trend = 'bearish';
         brokenLowIndex = activeLow.index;
       }
+    }
+
+    // Check if new swing points are confirmed at this index
+    const newPoint = swingPoints.find((p) => p.index === i);
+    if (newPoint) {
+      if (newPoint.isHigh) {
+        activeHigh = newPoint;
+        brokenHighIndex = -1; // reset break tracker for new high
+      } else {
+        activeLow = newPoint;
+        brokenLowIndex = -1; // reset break tracker for new low
+      }
+
+      // Update structural trend context
+      if (newPoint.type === 'HH') trend = 'bullish';
+      else if (newPoint.type === 'LL') trend = 'bearish';
     }
   }
 

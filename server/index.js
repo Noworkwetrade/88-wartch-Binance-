@@ -14,6 +14,7 @@ import { marketCache } from './marketCache.js';
 import { clientSocket } from './clientSocket.js';
 import { fetchKlines, isPermanentlyExcludedSymbol, normalizeSymbol } from './binanceRest.js';
 import { scannerService } from './scannerService.js';
+import { redactSingleAssetScan } from './apiRedaction.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -156,11 +157,8 @@ app.post('/api/scanner/scan-asset', async (req, res) => {
     }
     const symbol = normalizeSymbol(rawSymbol);
     const result = await scannerService.scanSingleAsset(symbol, timeframe || '15m');
-    res.json({
-      success: true,
-      result,
-      scanner: scannerService.getScanData()
-    });
+    const publicResponse = redactSingleAssetScan(result, { symbol, timeframe: timeframe || '15m' });
+    res.json(publicResponse);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

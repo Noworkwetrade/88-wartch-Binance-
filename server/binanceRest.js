@@ -85,6 +85,7 @@ export async function fetchExchangeInfo() {
       throw new Error('Invalid exchangeInfo response from Binance');
     }
 
+    // Venue-agnostic data feed: USDC and USD pairs remain in the data layer for multi-quote market monitoring, while scanner logic evaluates USDT-only.
     // Filter strictly to active Spot USDT, USDC, and USD trading pairs, permanently excluding stablecoin pairs like USDCUSDT
     const spotSymbols = data.symbols.filter((item) => {
       const isAllowedQuote = item && (item.quoteAsset === 'USDT' || item.quoteAsset === 'USDC' || item.quoteAsset === 'USD');

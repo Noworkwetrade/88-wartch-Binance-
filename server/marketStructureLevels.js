@@ -78,6 +78,64 @@ export function findFractalSwings(candles, lookback = 2) {
 }
 
 /**
+ * Identifies confirmed structural swing highs and swing lows.
+ * A confirmed structural swing turning point requires confirmation candles on BOTH sides:
+ * - Swing Low: Preceded by candles with higher lows (down leg into low) AND succeeded by
+ *   candles with higher lows (up leg turning away from low). Never uses the latest/unclosed candle.
+ * - Swing High: Preceded by candles with lower highs (up leg into high) AND succeeded by
+ *   candles with lower highs (down leg turning away from high). Never uses the latest/unclosed candle.
+ * - Minor pullbacks (noise / inside-bar wiggles without meaningful displacement) are excluded.
+ */
+export function findConfirmedStructuralSwings(candles, atr = 0) {
+  const highs = [];
+  const lows = [];
+  const len = candles ? candles.length : 0;
+  if (len < 5) return { highs, lows };
+
+  for (let i = 1; i < len - 1; i++) {
+    const cur = candles[i];
+    const prev = candles[i - 1];
+    const next = candles[i + 1];
+
+    // Check Swing Low confirmed on both sides
+    const isPivotLow = cur.low < prev.low && cur.low < next.low;
+    if (isPivotLow) {
+      let leftClearance = prev.high - cur.low;
+      if (i >= 2) leftClearance = Math.max(leftClearance, candles[i - 2].high - cur.low);
+      let rightClearance = next.high - cur.low;
+      if (i <= len - 3) rightClearance = Math.max(rightClearance, candles[i + 2].high - cur.low);
+
+      const minDisplacement = atr > 0 ? atr * 0.20 : cur.low * 0.001;
+      const isSubstantial = (leftClearance >= minDisplacement && rightClearance >= minDisplacement) ||
+        (i >= 2 && i <= len - 3 && cur.low <= candles[i - 2].low && cur.low <= candles[i - 1].low && cur.low <= candles[i + 1].low && cur.low <= candles[i + 2].low);
+
+      if (isSubstantial) {
+        lows.push({ price: cur.low, index: i, time: cur.openTime, type: 'low' });
+      }
+    }
+
+    // Check Swing High confirmed on both sides
+    const isPivotHigh = cur.high > prev.high && cur.high > next.high;
+    if (isPivotHigh) {
+      let leftClearance = cur.high - prev.low;
+      if (i >= 2) leftClearance = Math.max(leftClearance, cur.high - candles[i - 2].low);
+      let rightClearance = cur.high - next.low;
+      if (i <= len - 3) rightClearance = Math.max(rightClearance, cur.high - candles[i + 2].low);
+
+      const minDisplacement = atr > 0 ? atr * 0.20 : cur.high * 0.001;
+      const isSubstantial = (leftClearance >= minDisplacement && rightClearance >= minDisplacement) ||
+        (i >= 2 && i <= len - 3 && cur.high >= candles[i - 2].high && cur.high >= candles[i - 1].high && cur.high >= candles[i + 1].high && cur.high >= candles[i + 2].high);
+
+      if (isSubstantial) {
+        highs.push({ price: cur.high, index: i, time: cur.openTime, type: 'high' });
+      }
+    }
+  }
+
+  return { highs, lows };
+}
+
+/**
  * Clusters nearby price levels into meaningful Support and Resistance zones
  */
 export function clusterSupportResistance(candles) {
@@ -161,10 +219,10 @@ export function calculateMarketStructureLevels(options) {
     };
   }
 
-  // 1. Calculate Volatility & Dynamic Buffer for this specific pair & timeframe
+  // 1. Calculate Volatility & Dynamic Safety Buffer for this specific pair & timeframe
   const atr = calculateATR(candles, 14);
-  const minBuffer = entryPrice * 0.0002;
-  const buffer = Math.max(minBuffer, Math.min(entryPrice * 0.001, atr * 0.08));
+  const minBuffer = entryPrice * 0.0004;
+  const buffer = Math.max(minBuffer, Math.min(entryPrice * 0.0015, atr * 0.08));
 
   // 2. Identify Fractal Swings and S/R clusters
   const { highs, lows } = findFractalSwings(candles, 2);
@@ -172,7 +230,9 @@ export function calculateMarketStructureLevels(options) {
 
   // 5-minute candles for the 5-minute swing high/low if available, otherwise input candles
   const swingCandles = (fiveMinCandles && fiveMinCandles.length >= 5) ? fiveMinCandles : candles;
+  const swingAtr = calculateATR(swingCandles, 14);
   const { highs: swingHighs, lows: swingLows } = findFractalSwings(swingCandles, 2);
+  const { highs: confirmedHighs, lows: confirmedLows } = findConfirmedStructuralSwings(swingCandles, swingAtr);
 
   // Higher timeframe context if available
   let htfHighs = [];
@@ -183,7 +243,7 @@ export function calculateMarketStructureLevels(options) {
     htfLows = htfSwings.lows;
   }
 
-  // 3. Fallback recent extreme swings in the last 20 candles
+  // Fallback recent extreme swings in the last 20 candles for targets only (not SL)
   const recentWindow = candles.slice(-25);
   const recentLowestLow = Math.min(...recentWindow.map((c) => c.low));
   const recentHighestHigh = Math.max(...recentWindow.map((c) => c.high));
@@ -193,33 +253,51 @@ export function calculateMarketStructureLevels(options) {
     // LONG SETUP: Structure-Based Stop Loss and Take Profit
     // =========================================================================
 
-    // A. Identify the most relevant recent 5-minute swing low before entry
-    // The stop loss must be below the last 5-minute swing low at the lowest point of the previous swing
-    const validLowsBelow = swingLows
-      .filter((l) => l.price < entryPrice)
-      .sort((a, b) => b.time - a.time);
+    // A. Identify the latest valid, confirmed structural swing low before the signal
+    // Requirements:
+    // 1. Confirm the swing first using candles on both sides of turning point (never latest candle or minor pullback)
+    // 2. Use the last valid swing before the signal that matches market structure (below entry)
+    // 3. Add safety buffer beyond the swing level so normal price wicks don't trigger stop prematurely
+    // 4. Reject bad setups if no valid swing exists or stop is too close to entry (do not force invalid stop)
+    const allCandidateLows = [...swingLows, ...confirmedLows];
+    const seenLowTimes = new Set();
+    const uniqueLows = [];
+    for (const l of allCandidateLows) {
+      if (!seenLowTimes.has(l.time)) {
+        seenLowTimes.add(l.time);
+        uniqueLows.push(l);
+      }
+    }
 
-    const recentWindowLows = swingCandles.slice(-20).map((c) => c.low);
-    const fallbackLow = Math.min(...recentWindowLows);
+    // Must be below entry price AND strictly before the signal candle (confirmed on both sides)
+    const validLowsBelow = uniqueLows
+      .filter((l) => l.price < entryPrice && l.index < swingCandles.length - 1)
+      .sort((a, b) => b.time - a.time); // Most recent / latest confirmed swing first
 
-    const candidateLow = validLowsBelow.length > 0 ? validLowsBelow[0].price : fallbackLow;
-    const structuralLow = candidateLow;
+    // Rule 4: Reject bad setups if no valid swing exists instead of forcing an invalid stop
+    if (validLowsBelow.length === 0) {
+      return rejectResult(symbol, timeframe, entryPrice, 'No valid, confirmed structural swing low found below entry price. Setup rejected.');
+    }
+
+    // Latest confirmed structural swing low
+    const structuralLow = validLowsBelow[0].price;
     const chosenSupport = structuralLow;
 
-    // Place stop loss below the last 5-minute swing low with small structure buffer
+    // Place stop loss below the confirmed structural swing low with safety buffer
     const stopLoss = parseFloat((structuralLow - buffer).toFixed(6));
     const riskDistance = parseFloat((entryPrice - stopLoss).toFixed(6));
     const riskPercent = (riskDistance / entryPrice) * 100;
+    const minRiskDistance = parseFloat((entryPrice * 0.002).toFixed(6));
 
-    // Rule 7: No Forced Trades - Stop Loss Validation
+    // Stop Loss Validation: Reject if invalid or too close, never force artificial levels
     if (stopLoss >= entryPrice) {
-      return rejectResult(symbol, timeframe, entryPrice, 'No logical structural invalidation swing low below entry.');
+      return rejectResult(symbol, timeframe, entryPrice, 'No logical structural invalidation swing low below entry. Setup rejected.');
     }
     if (riskPercent > maxRiskPercent || riskDistance > atr * 4.5) {
       return rejectResult(symbol, timeframe, entryPrice, `Structural stop loss is unreasonably wide (${riskPercent.toFixed(2)}% | >4.5x ATR). Setup rejected.`);
     }
-    if (riskDistance < buffer * 0.8) {
-      return rejectResult(symbol, timeframe, entryPrice, 'Stop loss is too close to entry (structural compression noise). Setup rejected.');
+    if (riskDistance < minRiskDistance || riskDistance < buffer * 0.8) {
+      return rejectResult(symbol, timeframe, entryPrice, `Stop loss is too close to entry (risk distance $${riskDistance.toFixed(2)} is <0.20% / within noise buffer). Setup rejected.`);
     }
 
     // B. Identify Take Profit Targets based on actual chart structure
@@ -278,6 +356,9 @@ export function calculateMarketStructureLevels(options) {
         tp2 = parseFloat(htfTargets[0].toFixed(6));
         tp2Type = 'Higher Timeframe Major Resistance';
       }
+    } else {
+      tp2 = parseFloat((tp1 + Math.max(targetDistance, atr * 0.75)).toFixed(6));
+      tp2Type = 'Structural Target Extension';
     }
 
     return {
@@ -313,32 +394,51 @@ export function calculateMarketStructureLevels(options) {
     // SHORT SETUP: Structure-Based Stop Loss and Take Profit
     // =========================================================================
 
-    // A. Identify the highest point of the 5-minute swing high before entry
-    // If it's a sell signal the stop loss should be at the top of the highest point of the 5-minute swing high
-    const validHighsAbove = swingHighs
-      .filter((h) => h.price > entryPrice)
-      .sort((a, b) => b.time - a.time);
+    // A. Identify the latest valid, confirmed structural swing high before the signal
+    // Requirements:
+    // 1. Confirm the swing first using candles on both sides of turning point (never latest candle or minor pullback)
+    // 2. Use the last valid swing before the signal that matches market structure (above entry)
+    // 3. Add safety buffer beyond the swing level so normal price wicks don't trigger stop prematurely
+    // 4. Reject bad setups if no valid swing exists or stop is too close to entry (do not force invalid stop)
+    const allCandidateHighs = [...swingHighs, ...confirmedHighs];
+    const seenHighTimes = new Set();
+    const uniqueHighs = [];
+    for (const h of allCandidateHighs) {
+      if (!seenHighTimes.has(h.time)) {
+        seenHighTimes.add(h.time);
+        uniqueHighs.push(h);
+      }
+    }
 
-    const recentWindowHighs = swingCandles.slice(-20).map((c) => c.high);
-    const fallbackHigh = Math.max(...recentWindowHighs);
+    // Must be above entry price AND strictly before the signal candle (confirmed on both sides)
+    const validHighsAbove = uniqueHighs
+      .filter((h) => h.price > entryPrice && h.index < swingCandles.length - 1)
+      .sort((a, b) => b.time - a.time); // Most recent / latest confirmed swing first
 
-    const candidateHigh = validHighsAbove.length > 0 ? validHighsAbove[0].price : fallbackHigh;
-    const structuralHigh = candidateHigh;
+    // Rule 4: Reject bad setups if no valid swing exists instead of forcing an invalid stop
+    if (validHighsAbove.length === 0) {
+      return rejectResult(symbol, timeframe, entryPrice, 'No valid, confirmed structural swing high found above entry price. Setup rejected.');
+    }
+
+    // Latest confirmed structural swing high
+    const structuralHigh = validHighsAbove[0].price;
     const chosenResistance = structuralHigh;
 
-    // Place stop loss at the top of the highest point of the 5-minute swing high
+    // Place stop loss above the confirmed structural swing high with safety buffer
     const stopLoss = parseFloat((structuralHigh + buffer).toFixed(6));
     const riskDistance = parseFloat((stopLoss - entryPrice).toFixed(6));
     const riskPercent = (riskDistance / entryPrice) * 100;
+    const minRiskDistance = parseFloat((entryPrice * 0.002).toFixed(6));
 
+    // Stop Loss Validation: Reject if invalid or too close, never force artificial levels
     if (stopLoss <= entryPrice) {
-      return rejectResult(symbol, timeframe, entryPrice, 'No logical structural invalidation swing high above entry.');
+      return rejectResult(symbol, timeframe, entryPrice, 'No logical structural invalidation swing high above entry. Setup rejected.');
     }
     if (riskPercent > maxRiskPercent || riskDistance > atr * 4.5) {
       return rejectResult(symbol, timeframe, entryPrice, `Structural stop loss is unreasonably wide (${riskPercent.toFixed(2)}% | >4.5x ATR). Setup rejected.`);
     }
-    if (riskDistance < buffer * 0.8) {
-      return rejectResult(symbol, timeframe, entryPrice, 'Stop loss is too close to entry (structural compression noise). Setup rejected.');
+    if (riskDistance < minRiskDistance || riskDistance < buffer * 0.8) {
+      return rejectResult(symbol, timeframe, entryPrice, `Stop loss is too close to entry (risk distance $${riskDistance.toFixed(2)} is <0.20% / within noise buffer). Setup rejected.`);
     }
 
     const validLowsBelow = lows
@@ -396,6 +496,9 @@ export function calculateMarketStructureLevels(options) {
         tp2 = parseFloat(htfTargets[0].toFixed(6));
         tp2Type = 'Higher Timeframe Major Support';
       }
+    } else {
+      tp2 = parseFloat((tp1 - Math.max(targetDistance, atr * 0.75)).toFixed(6));
+      tp2Type = 'Structural Target Extension';
     }
 
     return {

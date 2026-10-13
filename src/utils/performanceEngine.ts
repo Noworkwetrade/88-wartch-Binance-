@@ -28,6 +28,7 @@ import { isPermanentlyExcludedSymbol } from './marketStructureQuality.ts';
 const STORAGE_KEY = 'nwwt_v8_signal_performance';
 
 export function loadStoredSignals(): ScannerSignalItem[] {
+  if (typeof localStorage === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
@@ -49,6 +50,7 @@ export function loadStoredSignals(): ScannerSignalItem[] {
 }
 
 export function saveStoredSignals(signals: ScannerSignalItem[]): void {
+  if (typeof localStorage === 'undefined') return;
   try {
     // Keep max 400 most recent signals, permanently excluding USDCUSDT & USD1USDT
     const sanitized = signals.filter((s) => s && s.asset && !isPermanentlyExcludedSymbol(s.asset));
@@ -88,6 +90,14 @@ export function mergeScannerSignals(
     if (inc.modelType === 'inverse' || inc.modelType === 'ai_filtered_inverse') continue;
     const existing = signalMap.get(inc.id);
 
+    // Check if a sibling signal for the exact same asset, timeframe, and closed candle exists
+    const matchingCandleSignal = Array.from(signalMap.values()).find((s) =>
+      s.id !== inc.id &&
+      s.asset === inc.asset &&
+      s.timeframe === inc.timeframe &&
+      (s.confirmedCandleCloseTime === inc.confirmedCandleCloseTime || s.timestamp === inc.timestamp)
+    );
+
     // If signal ID has already been cleared, it must NEVER reappear as ACTIVE
     if (clearedSet.has(inc.id)) {
       if (existing) {
@@ -97,15 +107,23 @@ export function mergeScannerSignals(
       } else if (inc.status && inc.status !== 'ACTIVE') {
         signalMap.set(inc.id, { ...inc, isTradeComplete: true });
       }
+      // Ensure any sibling baseline/model variants from the same candle are also cleared and completed
+      if (matchingCandleSignal) {
+        addClearedSignalId(matchingCandleSignal.id);
+        const resolvedStatus = (matchingCandleSignal.tp1Hit || matchingCandleSignal.status === 'WIN') ? 'WIN' : (inc.status && inc.status !== 'ACTIVE' ? inc.status : 'LOSS');
+        signalMap.set(matchingCandleSignal.id, {
+          ...matchingCandleSignal,
+          status: resolvedStatus,
+          isTradeComplete: true,
+          completedAt: inc.completedAt || matchingCandleSignal.completedAt || Date.now(),
+          exitPrice: inc.exitPrice !== undefined ? inc.exitPrice : matchingCandleSignal.exitPrice,
+          statusReason: inc.statusReason || matchingCandleSignal.statusReason,
+          displayMessage: inc.displayMessage || matchingCandleSignal.displayMessage,
+          pnlPercent: inc.pnlPercent !== undefined ? inc.pnlPercent : matchingCandleSignal.pnlPercent
+        });
+      }
       continue;
     }
-
-    // Check if a sibling signal for the exact same asset, timeframe, and closed candle exists
-    const matchingCandleSignal = Array.from(signalMap.values()).find((s) =>
-      s.asset === inc.asset &&
-      s.timeframe === inc.timeframe &&
-      (s.confirmedCandleCloseTime === inc.confirmedCandleCloseTime || s.timestamp === inc.timestamp)
-    );
 
     // If incoming trade is already settled (WIN / LOSS / EXPIRED), ensure all related variants are settled & cleared
     if (inc.status && inc.status !== 'ACTIVE') {
@@ -145,7 +163,7 @@ export function mergeScannerSignals(
       continue;
     }
 
-    // If matching candle setup is already settled / completed, DO NOT resurrect an ACTIVE signal
+    // If matching candle setup is already settled / completed or in cleared set, DO NOT resurrect an ACTIVE signal
     if (matchingCandleSignal && (matchingCandleSignal.isTradeComplete || matchingCandleSignal.status !== 'ACTIVE' || clearedSet.has(matchingCandleSignal.id))) {
       addClearedSignalId(inc.id);
       continue;
@@ -220,8 +238,8 @@ export function evaluateSignalsWithTicker(
   let changed = false;
 
   const updatedSignals = signals.map((s) => {
-    // Only monitor genuinely active signals that have not reached TP or SL
-    const isMonitoring = s.status === 'ACTIVE' && !s.isTradeComplete && !s.tp1Hit;
+    // Only monitor genuinely active signals that have not fully completed trade
+    const isMonitoring = !s.isTradeComplete && (s.status === 'ACTIVE' || (s.status === 'WIN' && s.tp1Hit));
     if (s.asset !== symbol || !isMonitoring) {
       return s;
     }
@@ -241,20 +259,20 @@ export function evaluateSignalsWithTicker(
         ? ((exitPrice - s.entryPrice) / s.entryPrice) * 100
         : ((s.entryPrice - exitPrice) / s.entryPrice) * 100;
 
-      // When TP (TP1 or TP2) is reached, immediately mark as complete WIN and remove from signals list
-      if (touch.touchedLevel === 'TP1' || touch.touchedLevel === 'TP' || touch.touchedLevel === 'TP2') {
+      // Case A: TP2 reached -> marks trade fully completed
+      if (touch.touchedLevel === 'TP2') {
         addClearedSignalId(s.id);
-        const rr = s.rewardRiskRatio || (Math.abs(exitPrice - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1));
-        const rrStr = rr.toFixed(2);
-        const msg = `tp hit | r:r ${rrStr} | win`;
-
+        const msg = 'tp #2 hit | trade complete';
+        const rr = s.rewardRiskRatio ? s.rewardRiskRatio * 1.6 : 1.6;
         return {
           ...s,
           tp1Hit: true,
-          tp2Hit: touch.touchedLevel === 'TP2',
-          tp1HitTimestamp: touch.touchTimestamp || now,
-          tp1Price: exitPrice,
+          tp2Hit: true,
+          tp2Price: exitPrice,
           status: 'WIN' as const,
+          outcome: 'win' as const,
+          settledAtLevel: 'tp2' as const,
+          realizedR: parseFloat(rr.toFixed(2)),
           displayMessage: msg,
           statusReason: msg,
           completedAt: touch.touchTimestamp || now,
@@ -266,18 +284,51 @@ export function evaluateSignalsWithTicker(
         };
       }
 
-      // Case C: SL touched -> Immediately mark as LOSS, complete, and remove from signals list
+      // Case B: TP1 reached -> marks WIN, keeps trade active to track TP2 or reversal
+      if (touch.touchedLevel === 'TP1' || touch.touchedLevel === 'TP') {
+        const rr = s.rewardRiskRatio || (Math.abs(exitPrice - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1));
+        const rrStr = rr.toFixed(2);
+        const msg = `tp #1 hit | r:r ${rrStr} | win`;
+
+        return {
+          ...s,
+          tp1Hit: true,
+          tp2Hit: false,
+          tp1HitTimestamp: touch.touchTimestamp || now,
+          tp1Price: exitPrice,
+          status: 'WIN' as const,
+          outcome: 'win' as const,
+          settledAtLevel: 'tp1' as const,
+          realizedR: parseFloat(rr.toFixed(2)),
+          displayMessage: msg,
+          statusReason: msg,
+          completedAt: touch.touchTimestamp || now,
+          exitPrice,
+          pnlPercent: Math.abs(pnlRaw),
+          isTradeComplete: false,
+          highestReached: highest,
+          lowestReached: lowest
+        };
+      }
+
+      // Case C: SL touched -> If TP1 was already hit, remains WIN; otherwise LOSS
       if (touch.touchedLevel === 'SL') {
         addClearedSignalId(s.id);
         const finalStatus: 'WIN' | 'LOSS' = s.tp1Hit ? 'WIN' : 'LOSS';
+        const finalOutcome: 'win' | 'loss' = s.tp1Hit ? 'win' : 'loss';
+        const finalLevel: 'tp1' | 'sl' = s.tp1Hit ? 'tp1' : 'sl';
         const rr = s.rewardRiskRatio || (Math.abs((s.tp1Price || s.takeProfit) - s.entryPrice) / (Math.abs(s.entryPrice - s.stopLoss) || 1));
         const rrStr = rr.toFixed(2);
+        const finalR = finalOutcome === 'win' ? parseFloat(rr.toFixed(2)) : -1.0;
         return {
           ...s,
           isTradeComplete: true,
           status: finalStatus,
-          displayMessage: s.tp1Hit ? `tp hit | r:r ${rrStr} | win` : `stop loss hit | loss`,
-          statusReason: s.tp1Hit ? `tp hit | r:r ${rrStr} | win` : `stop loss hit at $${exitPrice.toFixed(4)}`,
+          outcome: finalOutcome,
+          settledAtLevel: finalLevel,
+          realizedR: finalR,
+          displayMessage: s.tp1Hit ? `tp #1 hit | r:r ${rrStr} | win` : `stop loss hit | loss`,
+          statusReason: s.tp1Hit ? `tp #1 hit | r:r ${rrStr} | win` : `stop loss hit at $${exitPrice.toFixed(4)}`,
           completedAt: touch.touchTimestamp || now,
           exitPrice,
           pnlPercent: finalStatus === 'WIN' ? Math.abs(pnlRaw) : -Math.abs(pnlRaw),
@@ -293,6 +344,9 @@ export function evaluateSignalsWithTicker(
           ...s,
           isTradeComplete: true,
           status: 'LOSS' as const,
+          outcome: 'loss' as const,
+          settledAtLevel: 'sl' as const,
+          realizedR: -1.0,
           statusReason: touch.reason,
           displayMessage: 'conservative sl: both touched | loss',
           completedAt: touch.touchTimestamp || now,
@@ -369,6 +423,9 @@ export function settleSignalOutcome(
         // If TP was already secured, trade permanently REMAINS A WIN even if price touches SL later!
         const finalStatus: 'WIN' | 'LOSS' | 'EXPIRED' = (s.tp1Hit || s.status === 'WIN') ? 'WIN' : outcome;
         const isWin = finalStatus === 'WIN';
+        const finalOutcome: 'win' | 'loss' = isWin ? 'win' : 'loss';
+        const finalLevel: 'tp1' | 'tp2' | 'sl' = isWin ? (reason.includes('tp #2') ? 'tp2' : 'tp1') : 'sl';
+        const finalR = isWin ? (finalLevel === 'tp2' ? (s.rewardRiskRatio ? parseFloat((s.rewardRiskRatio * 1.6).toFixed(2)) : 1.6) : (s.rewardRiskRatio || 1.0)) : -1.0;
         const pnl = s.direction === 'UP'
           ? ((exitPrice - s.entryPrice) / s.entryPrice) * 100
           : ((s.entryPrice - exitPrice) / s.entryPrice) * 100;
@@ -378,6 +435,9 @@ export function settleSignalOutcome(
         return {
           ...s,
           status: finalStatus,
+          outcome: finalOutcome,
+          settledAtLevel: finalLevel,
+          realizedR: finalR,
           statusReason: reason,
           displayMessage: reason,
           tp1Hit: s.tp1Hit || isWin,

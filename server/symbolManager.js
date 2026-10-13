@@ -99,7 +99,32 @@ class SymbolManager {
     if (!symbol || isPermanentlyExcludedSymbol(symbol)) return null;
     return this.symbolMetaMap.get(symbol?.toUpperCase()) || null;
   }
+
+  /**
+   * Returns all symbols tracked by the data layer (USDT, USDC, USD pairs).
+   * Venue-agnostic feed layer preserves all active data symbols.
+   */
+  allDataSymbols() {
+    return this.symbolNames.filter((s) => s && !isPermanentlyExcludedSymbol(s));
+  }
+
+  /**
+   * Returns strictly USDT-denominated trading pairs for the scanner.
+   * Enforces USDT-only boundary on scanner evaluations.
+   */
+  scannerSymbols() {
+    return this.symbolNames.filter((s) => s && s.endsWith('USDT') && !isPermanentlyExcludedSymbol(s));
+  }
 }
 
 export const symbolManager = new SymbolManager();
+
+export function allDataSymbols() {
+  return symbolManager.allDataSymbols();
+}
+
+export function scannerSymbols() {
+  return symbolManager.scannerSymbols();
+}
+
 export default symbolManager;

@@ -8,7 +8,9 @@
     "build": "vite build",
     "start": "node server/index.js",
     "preview": "vite preview",
-    "test": "npx tsx scripts/testSignalTouch.ts && npx tsx scripts/testScannerValidation.ts && npx tsx scripts/testStructureLevels.ts && npx tsx scripts/testLiveStructureIntegration.ts && npx tsx scripts/testMarketStructureQuality.ts && npx tsx scripts/verifyMultiTimeframeRotation.ts",
+    "test": "node --import tsx --test server/scanner.symbols.test.js server/signalTouchEngine.test.js server/api.redaction.test.js server/binanceSocket.chaos.test.js server/touchEngine.parity.test.js server/marketStructure.choch.test.js server/stopLossStructuralScanner.test.js && npx tsx scripts/testSignalTouch.ts && npx tsx scripts/testScannerValidation.ts && npx tsx scripts/testStructureLevels.ts && npx tsx scripts/testLiveStructureIntegration.ts && npx tsx scripts/testMarketStructureQuality.ts && npx tsx scripts/verifyMultiTimeframeRotation.ts && npx tsx scripts/testBtcTradeLifecycleMismatch.ts && node scripts/test-btc-lifecycle.js",
+    "test:verify": "npx tsx scripts/verifyLiveScannerSuite.ts",
+    "test:lifecycle": "node scripts/test-btc-lifecycle.js && npx tsx scripts/testBtcTradeLifecycleMismatch.ts",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
@@ -24,7 +26,8 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^8.3.0",
-    "ws": "^8.22.0"
+    "ws": "^8.22.0",
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

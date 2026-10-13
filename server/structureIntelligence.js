@@ -518,3 +518,191 @@ export function calculateWalkForwardValidation(completedSignals) {
         : 'Warning: Out-of-sample performance shows divergence from training baseline.'
   };
 }
+
+/**
+ * Detects Market Structure & Structural Breaks (BOS / CHoCH)
+ *
+ * Rules:
+ * - Swing points (HH, HL, LH, LL) identified via fractal lookback
+ * - After a bearish leg (LL + BOS down), the FIRST break above the last swing high is a BULLISH CHoCH
+ * - Symmetrically, after a bullish leg (HH + BOS up), the FIRST break below the last swing low is a BEARISH CHoCH
+ * - Subsequent breaks in trend direction are continuation BOS
+ */
+export function detectMarketStructure(candles, lookback = 2) {
+  if (!candles || candles.length < lookback * 2 + 1) {
+    return {
+      swingPoints: [],
+      structureBreaks: [],
+      currentTrend: 'neutral'
+    };
+  }
+
+  const swingPoints = [];
+  const structureBreaks = [];
+
+  let lastSwingHigh = null;
+  let lastSwingLow = null;
+  let currentTrend = 'neutral';
+
+  const len = candles.length;
+  for (let i = lookback; i < len - lookback; i++) {
+    const current = candles[i];
+    let isHigh = true;
+    let isLow = true;
+
+    for (let offset = 1; offset <= lookback; offset++) {
+      if (candles[i - offset].high >= current.high || candles[i + offset].high > current.high) {
+        isHigh = false;
+      }
+      if (candles[i - offset].low <= current.low || candles[i + offset].low < current.low) {
+        isLow = false;
+      }
+    }
+
+    if (isHigh) {
+      const type = lastSwingHigh ? (current.high >= lastSwingHigh.price ? 'HH' : 'LH') : 'HH';
+      const point = {
+        index: i,
+        time: current.openTime,
+        price: current.high,
+        type,
+        isHigh: true
+      };
+      swingPoints.push(point);
+      lastSwingHigh = { price: current.high, index: i, type };
+
+      if (lastSwingLow && lastSwingHigh) {
+        if (lastSwingHigh.type === 'HH' && lastSwingLow.type === 'HL') {
+          currentTrend = 'bullish';
+        } else if (lastSwingHigh.type === 'LH' && lastSwingLow.type === 'LL') {
+          currentTrend = 'bearish';
+        }
+      }
+    }
+
+    if (isLow) {
+      const type = lastSwingLow ? (current.low >= lastSwingLow.price ? 'HL' : 'LL') : 'LL';
+      const point = {
+        index: i,
+        time: current.openTime,
+        price: current.low,
+        type,
+        isHigh: false
+      };
+      swingPoints.push(point);
+      lastSwingLow = { price: current.low, index: i, type };
+
+      if (lastSwingLow && lastSwingHigh) {
+        if (lastSwingHigh.type === 'HH' && lastSwingLow.type === 'HL') {
+          currentTrend = 'bullish';
+        } else if (lastSwingHigh.type === 'LH' && lastSwingLow.type === 'LL') {
+          currentTrend = 'bearish';
+        }
+      }
+    }
+  }
+
+  let activeHigh = null;
+  let activeLow = null;
+  let trend = currentTrend;
+  let brokenHighIndex = -1;
+  let brokenLowIndex = -1;
+
+  for (let i = 0; i < len; i++) {
+    const candle = candles[i];
+
+    // Upward break of active swing high BEFORE updating activeHigh
+    if (activeHigh && i > activeHigh.index && brokenHighIndex !== activeHigh.index) {
+      if (candle.close > activeHigh.price) {
+        const isChoch = trend === 'bearish';
+        structureBreaks.push({
+          type: isChoch ? 'CHoCH' : 'BOS',
+          direction: 'bullish',
+          breakIndex: i,
+          breakTime: candle.openTime,
+          breakPrice: candle.close,
+          originIndex: activeHigh.index,
+          originPrice: activeHigh.price
+        });
+        trend = 'bullish';
+        brokenHighIndex = activeHigh.index;
+      }
+    }
+
+    // Downward break of active swing low BEFORE updating activeLow
+    if (activeLow && i > activeLow.index && brokenLowIndex !== activeLow.index) {
+      if (candle.close < activeLow.price) {
+        const isChoch = trend === 'bullish';
+        structureBreaks.push({
+          type: isChoch ? 'CHoCH' : 'BOS',
+          direction: 'bearish',
+          breakIndex: i,
+          breakTime: candle.openTime,
+          breakPrice: candle.close,
+          originIndex: activeLow.index,
+          originPrice: activeLow.price
+        });
+        trend = 'bearish';
+        brokenLowIndex = activeLow.index;
+      }
+    }
+
+    const newPoint = swingPoints.find((p) => p.index === i);
+    if (newPoint) {
+      if (newPoint.isHigh) {
+        activeHigh = newPoint;
+        brokenHighIndex = -1;
+      } else {
+        activeLow = newPoint;
+        brokenLowIndex = -1;
+      }
+
+      if (newPoint.type === 'HH') trend = 'bullish';
+      else if (newPoint.type === 'LL') trend = 'bearish';
+      else if (newPoint.type === 'LH' && trend === 'neutral') trend = 'bearish';
+      else if (newPoint.type === 'HL' && trend === 'neutral') trend = 'bullish';
+    }
+  }
+
+  return {
+    swingPoints,
+    structureBreaks: structureBreaks.slice(-8),
+    currentTrend: trend !== 'neutral' ? trend : currentTrend
+  };
+}
+
+/**
+ * Helper to detect recent Change of Character (CHoCH)
+ */
+export function detectCHoCH(candles, lookback = 2) {
+  const structure = detectMarketStructure(candles, lookback);
+  const chochs = structure.structureBreaks.filter((b) => b.type === 'CHoCH');
+  const lastChoch = chochs.length > 0 ? chochs[chochs.length - 1] : null;
+  return {
+    hasChoch: Boolean(lastChoch),
+    lastChoch,
+    direction: lastChoch ? lastChoch.direction : null,
+    structure
+  };
+}
+
+/**
+ * Detects if a candle constitutes a genuine fakeout / liquidity sweep rejection
+ * - High fakeout (Bearish Fakeout): candle wicks above a prior swing high AND closes back below it with body < 40% of range
+ * - Low fakeout (Bullish Fakeout): candle wicks below a prior swing low AND closes back above it with body < 40% of range
+ */
+export function detectFakeout(candle, priorLevel, type = 'high') {
+  if (!candle || priorLevel == null) return false;
+  const range = candle.high - candle.low;
+  if (range <= 0) return false;
+  const body = Math.abs(candle.close - candle.open);
+  const bodyRatio = body / range;
+
+  if (type === 'high' || type === 'bearish' || type === 'resistance') {
+    return candle.high > priorLevel && candle.close < priorLevel && bodyRatio < 0.40;
+  } else {
+    return candle.low < priorLevel && candle.close > priorLevel && bodyRatio < 0.40;
+  }
+}
+
+

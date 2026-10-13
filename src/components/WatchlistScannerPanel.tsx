@@ -120,20 +120,45 @@ export const WatchlistScannerPanel: React.FC<WatchlistScannerPanelProps> = ({
         body: JSON.stringify({ symbol: target, timeframe })
       });
       const data = await res.json();
-      if (data && data.result) {
-        const r = data.result;
-        setScannedSignal(r.signal || null);
-        setSingleAssetEvaluation(r);
+      const directSignal = data && data.direction ? {
+        id: `scan-${data.symbol}-${data.timeframe}-${data.timestamp}`,
+        asset: data.symbol,
+        timeframe: data.timeframe,
+        direction: data.direction,
+        setupType: data.direction === 'UP' ? 'Long Setup' : 'Short Setup',
+        entryPrice: data.entry,
+        signalPrice: data.entry,
+        stopLoss: data.stopLoss,
+        takeProfit1: data.takeProfit1,
+        takeProfit2: data.takeProfit2,
+        rewardRiskRatio: data.rewardRisk,
+        confidence: data.confidence,
+        timestamp: data.timestamp,
+        status: data.status || 'ACTIVE'
+      } : null;
+
+      const evalData = data && data.result ? data.result : {
+        asset: data?.symbol || target,
+        timeframe: data?.timeframe || timeframe,
+        hasSetup: Boolean(directSignal),
+        action: directSignal ? (directSignal.direction === 'UP' ? 'BUY' : 'SELL') : 'NO SETUP',
+        signal: directSignal
+      };
+
+      if (directSignal || (data && data.result)) {
+        const activeSig = directSignal || data.result?.signal || null;
+        setScannedSignal(activeSig);
+        setSingleAssetEvaluation(evalData);
         setIsScanModalOpen(true);
-        if (r.hasSetup && r.signal) {
+        if (activeSig) {
           setScanMessage(
-            `Signal on ${target} (${timeframe}): ${r.signal.direction === 'UP' ? 'BUY' : 'SELL'}`
+            `Signal on ${target} (${timeframe}): ${activeSig.direction === 'UP' ? 'BUY' : 'SELL'}`
           );
         } else {
-          setScanMessage(`no valid setup found`);
+          setScanMessage('no valid setup found');
         }
       } else {
-        setScanMessage(`no valid setup found`);
+        setScanMessage('no valid setup found');
       }
     } catch {
       setScanMessage(`no valid setup found`);
