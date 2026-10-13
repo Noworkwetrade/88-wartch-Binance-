@@ -170,4 +170,34 @@ test('Stop Loss Structural Scanner Requirements Suite', async (t) => {
 
     assert.equal(signal.stopLoss, 83400, 'Stop loss must remain frozen at 83400');
   });
+  await t.test('Req 6: Completed signals remain visible in the recent signals list', () => {
+    const signal = scannerService.createSignalItem({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      direction: 'UP',
+      setupType: 'Breakout',
+      closePrice: 85000,
+      invalidationLevel: 84000,
+      stopLoss: 84000,
+      takeProfit1: 87000,
+      confidence: 85,
+      reason: 'Test signal history retention',
+      timestamp: Date.now(),
+      confirmedCandleCloseTime: Date.now()
+    });
+    signal.status = 'LOSS';
+    signal.isTradeComplete = true;
+    const previous = scannerService.performanceSignals.get(signal.id);
+    scannerService.performanceSignals.set(signal.id, signal);
+    try {
+      scannerService.syncActiveSignalsArray();
+      assert.ok(scannerService.signals.some((item) => item.id === signal.id),
+        'Settled signal remains in the recent signals list');
+    } finally {
+      scannerService.performanceSignals.delete(signal.id);
+      if (previous) scannerService.performanceSignals.set(signal.id, previous);
+      scannerService.syncActiveSignalsArray();
+    }
+  });
+
 });

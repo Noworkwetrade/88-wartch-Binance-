@@ -229,7 +229,10 @@ export function calculateMarketStructureLevels(options) {
   const { supports, resistances } = clusterSupportResistance(candles);
 
   // 5-minute candles for the 5-minute swing high/low if available, otherwise input candles
-  const swingCandles = (fiveMinCandles && fiveMinCandles.length >= 5) ? fiveMinCandles : candles;
+  // Stop loss structure must come from the selected entry timeframe.
+  // Using 5m swings for a 15m/1h signal can mistake a minor intrabar pivot for
+  // the actual structural swing and place the stop too close to entry.
+  const swingCandles = candles;
   const swingAtr = calculateATR(swingCandles, 14);
   const { highs: swingHighs, lows: swingLows } = findFractalSwings(swingCandles, 2);
   const { highs: confirmedHighs, lows: confirmedLows } = findConfirmedStructuralSwings(swingCandles, swingAtr);

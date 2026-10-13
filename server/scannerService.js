@@ -588,14 +588,15 @@ class ScannerService {
   }
 
   syncActiveSignalsArray() {
-    const all = Array.from(this.performanceSignals.values()).filter(
+    // Keep called signals visible after settlement so the signal list acts as a
+    // recent signal history, not just an active-trade list. The authoritative
+    // performanceSignals map retains lifecycle and settlement data.
+    const retained = Array.from(this.performanceSignals.values()).filter(
       (s) => !isPermanentlyExcludedSymbol(s.asset)
     );
-    // STRICT ACTIVE SIGNALS ONLY for the scanner live stream!
-    // Completed signals (WIN / LOSS / EXPIRED) are removed from active scanner immediately.
-    const activeOnly = all.filter((s) => s.status === 'ACTIVE');
-    activeOnly.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    this.signals = activeOnly;
+    retained.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    // Bound the public list while preserving recent WIN / LOSS / EXPIRED entries.
+    this.signals = retained.slice(0, 200);
   }
 
   async runScan(timeframe = '15m') {
